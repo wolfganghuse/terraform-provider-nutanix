@@ -1,6 +1,7 @@
 package nutanix
 
 import (
+	"bytes"
 	"fmt"
 	"log"
 	"reflect"
@@ -13,9 +14,10 @@ import (
 	v3 "github.com/terraform-providers/terraform-provider-nutanix/client/v3"
 	"github.com/terraform-providers/terraform-provider-nutanix/utils"
 
-	"github.com/hashicorp/terraform-plugin-sdk/helper/resource"
-	"github.com/hashicorp/terraform-plugin-sdk/helper/schema"
-	"github.com/hashicorp/terraform-plugin-sdk/helper/validation"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/hashcode"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/validation"
 )
 
 var (
@@ -647,8 +649,16 @@ func resourceNutanixVirtualMachine() *schema.Resource {
 				Computed: true,
 			},
 			"disk_list": {
-				Type:     schema.TypeList,
+				Type:     schema.TypeSet,
 				Optional: true,
+				Set: func(v interface{}) int {
+					var buf bytes.Buffer
+					m := v.(map[string]interface{})
+					buf.WriteString(fmt.Sprintf("%d-", m["device_index"].(int)))
+					buf.WriteString(fmt.Sprintf("%s-", m["adapter_type"].(string)))
+					buf.WriteString(fmt.Sprintf("%s-", m["device_type"].(string)))
+					return hashcode.String(buf.String())
+				},
 				Elem: &schema.Resource{
 					Schema: map[string]*schema.Schema{
 						"uuid": {
@@ -708,40 +718,58 @@ func resourceNutanixVirtualMachine() *schema.Resource {
 								},
 							},
 						},
-						"device_properties": {
-							Type:     schema.TypeList,
-							Optional: true,
-							Computed: true,
-							MaxItems: 1,
-							Elem: &schema.Resource{
-								Schema: map[string]*schema.Schema{
-									"device_type": {
-										Type:     schema.TypeString,
-										Optional: true,
-										Computed: true,
-									},
-									"disk_address": {
-										Type:     schema.TypeMap,
-										Optional: true,
-										Computed: true,
-										Elem: &schema.Resource{
-											Schema: map[string]*schema.Schema{
-												"device_index": {
-													Type:     schema.TypeInt,
-													Optional: true,
-													Computed: true,
-												},
-												"adapter_type": {
-													Type:     schema.TypeString,
-													Optional: true,
-													Computed: true,
-												},
-											},
-										},
-									},
-								},
-							},
+						"device_index": {
+							Type:     schema.TypeInt,
+							Required: true,
 						},
+						"adapter_type": {
+							Type:     schema.TypeString,
+							Required: true,
+						},
+						"device_type": {
+							Type:         schema.TypeString,
+							Required:     true,
+							ValidateFunc: validation.StringInSlice([]string{"DISK", "CDROOM", "VOLUME_GROUP"}, false),
+						},
+						"image_uuid": {
+							Type:     schema.TypeString,
+							Optional: true,
+						},
+
+						// "device_properties": {
+						// 	Type:     schema.TypeList,
+						// 	Optional: true,
+						// 	Computed: true,
+						// 	MaxItems: 1,
+						// 	Elem: &schema.Resource{
+						// 		Schema: map[string]*schema.Schema{
+						// 			"device_type": {
+						// 				Type:     schema.TypeString,
+						// 				Optional: true,
+						// 				Computed: true,
+						// 			},
+						// 			"disk_address": {
+						// 				Type:     schema.TypeMap,
+						// 				Optional: true,
+						// 				Computed: true,
+						// 				Elem: &schema.Resource{
+						// 					Schema: map[string]*schema.Schema{
+						// 						"device_index": {
+						// 							Type:     schema.TypeInt,
+						// 							Optional: true,
+						// 							Computed: true,
+						// 						},
+						// 						"adapter_type": {
+						// 							Type:     schema.TypeString,
+						// 							Optional: true,
+						// 							Computed: true,
+						// 						},
+						// 					},
+						// 				},
+						// 			},
+						// 		},
+						// 	},
+						// },
 						"data_source_reference": {
 							Type:     schema.TypeMap,
 							Optional: true,
@@ -956,7 +984,7 @@ func resourceNutanixVirtualMachineRead(d *schema.ResourceData, meta interface{})
 		return fmt.Errorf("error setting nic_list_status for Virtual Machine %s: %s", d.Id(), err)
 	}
 
-	if err := d.Set("disk_list", flattenDiskList(resp.Spec.Resources.DiskList)); err != nil {
+	if err := d.Set("disk_list", flattenDiskListSet(resp.Spec.Resources.DiskList)); err != nil {
 		return fmt.Errorf("error setting disk_list for Virtual Machine %s: %s", d.Id(), err)
 	}
 
@@ -1277,6 +1305,17 @@ func resourceNutanixVirtualMachineUpdate(d *schema.ResourceData, meta interface{
 		}
 
 		res.DiskList = expandDiskListUpdate(d, response)
+
+		utils.PrintToJSON(res.DiskList, "PRE res.DiskList: ")
+		imageMismatch := parseDiskImageChange(response, res.DiskList)
+		utils.PrintToJSON(res.DiskList, "POST res.DiskList: ")
+		// if err != nil {
+		// 	return err
+		// }
+
+		if imageMismatch {
+			hotPlugChange = false
+		}
 
 		postCdromCount, err := CountDiskListCdrom(res.DiskList)
 		if err != nil {
@@ -1774,6 +1813,58 @@ func expandDiskListUpdate(d *schema.ResourceData, vm *v3.VMIntentResponse) []*v3
 
 func expandDiskList(d *schema.ResourceData) []*v3.VMDisk {
 	if v, ok := d.GetOk("disk_list"); ok {
+		dsk := v.(*schema.Set).List()
+		if len(dsk) > 0 {
+			dls := make([]*v3.VMDisk, len(dsk))
+
+			for k, val := range dsk {
+				v := val.(map[string]interface{})
+				dl := &v3.VMDisk{}
+
+				// uuid
+				if v1, ok1 := v["uuid"]; ok1 && v1.(string) != "" {
+					dl.UUID = utils.StringPtr(v1.(string))
+				}
+				// storage_config
+				if v, ok1 := v["storage_config"]; ok1 {
+					dl.StorageConfig = expandStorageConfig(v.([]interface{}))
+				}
+				// device_properties
+				// if v1, ok1 := v["device_properties"]; ok1 {
+				// 	dl.DeviceProperties = expandDeviceProperties(v1.([]interface{}))
+				// }
+
+				//deviceProperties
+				dl.DeviceProperties = expandDevicePropertiesSet(v)
+
+				// data_source_reference
+				if v1, ok := v["data_source_reference"]; ok && len(v1.(map[string]interface{})) != 0 {
+					dsref := v1.(map[string]interface{})
+					dl.DataSourceReference = validateShortRef(dsref)
+				}
+				// volume_group_reference
+				if v1, ok := v["volume_group_reference"]; ok {
+					volgr := v1.(map[string]interface{})
+					dl.VolumeGroupReference = validateRef(volgr)
+				}
+				// disk_size_bytes
+				if v1, ok1 := v["disk_size_bytes"]; ok1 && v1.(int) != 0 {
+					dl.DiskSizeBytes = utils.Int64Ptr(int64(v1.(int)))
+				}
+				// disk_size_mib
+				if v1, ok := v["disk_size_mib"]; ok && v1.(int) != 0 {
+					dl.DiskSizeMib = utils.Int64Ptr(int64(v1.(int)))
+				}
+				dls[k] = dl
+			}
+			return dls
+		}
+	}
+	return nil
+}
+
+func expandDiskListSet(d *schema.ResourceData) []*v3.VMDisk {
+	if v, ok := d.GetOk("disk_list"); ok {
 		dsk := v.([]interface{})
 		if len(dsk) > 0 {
 			dls := make([]*v3.VMDisk, len(dsk))
@@ -1859,6 +1950,32 @@ func expandDeviceProperties(deviceProperties []interface{}) *v3.VMDiskDeviceProp
 		}
 		return dp
 	}
+	return nil
+}
+
+func expandDevicePropertiesSet(disk map[string]interface{}) *v3.VMDiskDeviceProperties {
+	dp := &v3.VMDiskDeviceProperties{}
+
+	if v, ok := disk["device_type"]; ok {
+		dp.DeviceType = utils.StringPtr(v.(string))
+	}
+
+	v3disk := &v3.DiskAddress{}
+
+	if di, diOk := disk["device_index"]; diOk {
+		v3disk.DeviceIndex = utils.Int64Ptr(cast.ToInt64(di))
+	}
+	if at, atOk := disk["adapter_type"]; atOk {
+		v3disk.AdapterType = utils.StringPtr(at.(string))
+	}
+	if !reflect.DeepEqual(*v3disk, v3.DiskAddress{}) {
+		dp.DiskAddress = v3disk
+	}
+
+	if !reflect.DeepEqual(*dp, v3.VMDiskDeviceProperties{}) {
+		return dp
+	}
+
 	return nil
 }
 
@@ -2087,6 +2204,40 @@ func CountDiskListCdrom(dl []*v3.VMDisk) (int, error) {
 		}
 	}
 	return counter, nil
+}
+
+func parseDiskImageChange(vmOutput *v3.VMIntentResponse, expandedDiskList []*v3.VMDisk) bool {
+	utils.PrintToJSON(expandedDiskList, "[parseDiskImageChange] PRE expandedDiskList: ")
+	foundImageMismatch := false
+	if vmOutput.Status.Resources.DiskList != nil {
+		currentDiskList := vmOutput.Status.Resources.DiskList
+		utils.PrintToJSON(currentDiskList, "[parseDiskImageChange] currentDiskList: ")
+		// Loop the disks to be updated via PUT
+		for _, nDisk := range expandedDiskList {
+			// check if disk uuid is not nil => is existing disk
+			if nDisk.UUID != nil {
+				// Loop over the current VM disks
+				for _, cDisk := range currentDiskList {
+					// perform a match... Need to check ndisk again since we put it to nil late rin the loop
+					if cDisk.UUID != nil && nDisk.UUID != nil && *nDisk.UUID == *cDisk.UUID {
+						// check if all attrs are not nil and compare the image UUIDs
+						if nDisk.DataSourceReference != nil &&
+							nDisk.DataSourceReference.UUID != nil &&
+							cDisk.DataSourceReference != nil &&
+							cDisk.DataSourceReference.UUID != nil &&
+							*cDisk.DataSourceReference.UUID != *nDisk.DataSourceReference.UUID {
+							// clear UUID so the API sees it as new disk
+							nDisk.UUID = nil
+							foundImageMismatch = true
+						}
+					}
+				}
+			}
+		}
+	}
+	log.Printf("[parseDiskImageChange] foundImageMismatch: %t", foundImageMismatch)
+	utils.PrintToJSON(expandedDiskList, "[parseDiskImageChange] POST expandedDiskList: ")
+	return foundImageMismatch
 }
 
 func resourceVirtualMachineInstanceStateUpgradeV0(is map[string]interface{}, meta interface{}) (map[string]interface{}, error) {
@@ -2703,7 +2854,7 @@ func resourceNutanixVirtualMachineInstanceResourceV0() *schema.Resource {
 				Computed: true,
 			},
 			"disk_list": {
-				Type:     schema.TypeList,
+				Type:     schema.TypeSet,
 				Optional: true,
 				Elem: &schema.Resource{
 					Schema: map[string]*schema.Schema{

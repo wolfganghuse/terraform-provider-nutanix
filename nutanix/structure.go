@@ -154,6 +154,55 @@ func flattenDiskList(disks []*v3.VMDisk) []map[string]interface{} {
 	return diskList
 }
 
+func flattenDiskListSet(disks []*v3.VMDisk) []map[string]interface{} {
+	diskList := make([]map[string]interface{}, 0)
+	for _, v := range disks {
+		var storageConfig []map[string]interface{}
+
+		if v.StorageConfig != nil {
+			storageConfig = append(storageConfig, map[string]interface{}{
+				"flash_mode": cast.ToString(v.StorageConfig.FlashMode),
+				"storage_container_reference": []map[string]interface{}{
+					{
+						"url":  cast.ToString(v.StorageConfig.StorageContainerReference.URL),
+						"kind": cast.ToString(v.StorageConfig.StorageContainerReference.Kind),
+						"name": cast.ToString(v.StorageConfig.StorageContainerReference.Name),
+						"uuid": cast.ToString(v.StorageConfig.StorageContainerReference.UUID),
+					},
+				},
+			})
+		}
+
+		//Set previous values
+		disk := map[string]interface{}{
+			"uuid":                   utils.StringValue(v.UUID),
+			"disk_size_bytes":        utils.Int64Value(v.DiskSizeBytes),
+			"disk_size_mib":          utils.Int64Value(v.DiskSizeMib),
+			"storage_config":         storageConfig,
+			"data_source_reference":  flattenReferenceValues(v.DataSourceReference),
+			"volume_group_reference": flattenReferenceValues(v.VolumeGroupReference),
+		}
+
+		//Set deviceProperties values
+		if v.DeviceProperties != nil {
+			index := utils.Int64Value(v.DeviceProperties.DiskAddress.DeviceIndex)
+			adapter := v.DeviceProperties.DiskAddress.AdapterType
+			deviceType := v.DeviceProperties.DeviceType
+
+			if index == 3 && *adapter == IDE {
+				continue
+			}
+
+			disk["device_index"] = index
+			disk["adapter_type"] = adapter
+			disk["device_type"] = deviceType
+		}
+
+		diskList = append(diskList, disk)
+	}
+	return diskList
+}
+
 func flattenSerialPortList(serialPorts []*v3.VMSerialPort) []map[string]interface{} {
 	serialPortList := make([]map[string]interface{}, 0)
 	if serialPorts != nil {
