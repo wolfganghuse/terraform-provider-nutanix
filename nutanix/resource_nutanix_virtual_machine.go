@@ -650,6 +650,7 @@ func resourceNutanixVirtualMachine() *schema.Resource {
 			"disk_list": {
 				Type:     schema.TypeList,
 				Optional: true,
+				Computed: true,
 				Elem: &schema.Resource{
 					Schema: map[string]*schema.Schema{
 						"uuid": {
@@ -712,12 +713,14 @@ func resourceNutanixVirtualMachine() *schema.Resource {
 						"device_properties": {
 							Type:     schema.TypeList,
 							Optional: true,
+							Computed: true,
 							MaxItems: 1,
 							Elem: &schema.Resource{
 								Schema: map[string]*schema.Schema{
 									"device_type": {
 										Type:     schema.TypeString,
 										Optional: true,
+										Computed: true,
 									},
 									"disk_address": {
 										Type:     schema.TypeMap,
@@ -727,10 +730,12 @@ func resourceNutanixVirtualMachine() *schema.Resource {
 												"device_index": {
 													Type:     schema.TypeInt,
 													Optional: true,
+													Computed: true,
 												},
 												"adapter_type": {
 													Type:     schema.TypeString,
 													Optional: true,
+													Computed: true,
 												},
 											},
 										},
