@@ -711,26 +711,26 @@ func resourceNutanixVirtualMachine() *schema.Resource {
 						},
 						"device_properties": {
 							Type:     schema.TypeList,
-							Required: true,
+							Optional: true,
 							MaxItems: 1,
 							Elem: &schema.Resource{
 								Schema: map[string]*schema.Schema{
 									"device_type": {
 										Type:     schema.TypeString,
-										Required: true,
+										Optional: true,
 									},
 									"disk_address": {
 										Type:     schema.TypeMap,
-										Required: true,
+										Optional: true,
 										Elem: &schema.Resource{
 											Schema: map[string]*schema.Schema{
 												"device_index": {
 													Type:     schema.TypeInt,
-													Required: true,
+													Optional: true,
 												},
 												"adapter_type": {
 													Type:     schema.TypeString,
-													Required: true,
+													Optional: true,
 												},
 											},
 										},
