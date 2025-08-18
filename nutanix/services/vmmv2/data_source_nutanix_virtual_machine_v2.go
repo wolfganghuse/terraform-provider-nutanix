@@ -2549,7 +2549,10 @@ func flattenNic(nic []config.Nic) []interface{} {
 
 			nics["backing_info"] = backingInfo
 
-			if v.NetworkInfo != nil {
+			if v.NicNetworkInfo != nil {
+				nics["network_info"] = flattenPolymorphicNicNetworkInfo(v.NicNetworkInfo)
+			} else if v.NetworkInfo != nil {
+				// Fallback to flattened NetworkInfo if polymorphic version is not available
 				nics["network_info"] = flattenNicNetworkInfo(v.NetworkInfo)
 			} else {
 				// Create network_info structure for disconnected NICs with inferred type
@@ -2712,6 +2715,11 @@ func flattenEmulatedNicModel(pr *config.EmulatedNicModel) string {
 
 func flattenNicNetworkInfo(pr *config.NicNetworkInfo) []map[string]interface{} {
 	if pr != nil {
+		log.Printf("[DEBUG] flattenNicNetworkInfo: processing NetworkInfo with ObjectType_: %v", pr.ObjectType_)
+		if pr.ObjectType_ != nil {
+			log.Printf("[DEBUG] flattenNicNetworkInfo: ObjectType_ value: %s", *pr.ObjectType_)
+		}
+		
 		nicList := make([]map[string]interface{}, 0)
 		nic := make(map[string]interface{})
 
@@ -2743,10 +2751,183 @@ func flattenNicNetworkInfo(pr *config.NicNetworkInfo) []map[string]interface{} {
 			nic["ipv4_info"] = flattenIpv4Info(pr.Ipv4Info)
 		}
 
+		// Handle VLAN ID for SR-IOV NICs
+		// API client flattens SriovNicNetworkInfo to generic NicNetworkInfo, losing VlanId field
+		// For DIRECT_NIC (SR-IOV), we need to check if there's VLAN configuration
+		// Note: Since API client flattens polymorphic types, VlanId field is not available in generic NicNetworkInfo
+		// This is a known limitation - VLAN ID needs to be preserved from terraform state for SR-IOV NICs
+		if pr.NicType != nil && *pr.NicType == config.NicType(3) { // DIRECT_NIC = 3
+			// For SR-IOV NICs, set vlan_id to 0 as placeholder
+			// The actual VLAN ID should be maintained by terraform state/plan
+			nic["vlan_id"] = 0
+			log.Printf("[DEBUG] flattenNicNetworkInfo: DIRECT_NIC detected, setting vlan_id to 0 (API client flattens SriovNicNetworkInfo)")
+		}
+
+		// Add debug log to see all fields in the NetworkInfo structure
+		log.Printf("[DEBUG] flattenNicNetworkInfo: NetworkInfo structure: %+v", pr)
+
 		nicList = append(nicList, nic)
 		return nicList
 	}
 	return nil
+}
+
+// flattenPolymorphicNicNetworkInfo handles OneOfNicNicNetworkInfo which can contain
+// either VirtualEthernetNicNetworkInfo or SriovNicNetworkInfo
+func flattenPolymorphicNicNetworkInfo(pr *config.OneOfNicNicNetworkInfo) []map[string]interface{} {
+	if pr == nil {
+		return nil
+	}
+
+	// Use the GetValue method to extract the actual NetworkInfo object
+	networkInfoInterface := pr.GetValue()
+	if networkInfoInterface == nil {
+		return nil
+	}
+
+	// Convert to JSON and back to extract the actual type and data
+	jsonBytes, err := json.Marshal(networkInfoInterface)
+	if err != nil {
+		log.Printf("[DEBUG] flattenPolymorphicNicNetworkInfo: Failed to marshal NetworkInfo: %v", err)
+		return nil
+	}
+
+	var rawNetworkInfo map[string]interface{}
+	if err := json.Unmarshal(jsonBytes, &rawNetworkInfo); err != nil {
+		log.Printf("[DEBUG] flattenPolymorphicNicNetworkInfo: Failed to unmarshal NetworkInfo: %v", err)
+		return nil
+	}
+
+	objectType, _ := rawNetworkInfo["$objectType"].(string)
+	log.Printf("[DEBUG] flattenPolymorphicNicNetworkInfo: Detected ObjectType: %s", objectType)
+
+	nicList := make([]map[string]interface{}, 0)
+	nic := make(map[string]interface{})
+
+	// Handle common fields for both types
+	if nicType, ok := rawNetworkInfo["nicType"].(float64); ok {
+		nic["nic_type"] = flattenNicTypeFromInt(int(nicType))
+	} else {
+		// Fallback: try to infer nic_type from objectType
+		if objectType == "vmm.v4.ahv.config.SriovNicNetworkInfo" {
+			nic["nic_type"] = "DIRECT_NIC"
+		} else {
+			nic["nic_type"] = "NORMAL_NIC"
+		}
+	}
+
+	if subnet, ok := rawNetworkInfo["subnet"].(map[string]interface{}); ok {
+		if extId, ok := subnet["extId"].(string); ok {
+			nic["subnet"] = []map[string]interface{}{
+				{"ext_id": extId},
+			}
+		}
+	}
+
+	if vlanMode, ok := rawNetworkInfo["vlanMode"].(string); ok {
+		nic["vlan_mode"] = vlanMode
+	}
+
+	if trunkedVlans, ok := rawNetworkInfo["trunkedVlans"].([]interface{}); ok {
+		nic["trunked_vlans"] = trunkedVlans
+	}
+
+	// Handle type-specific fields
+	if objectType == "vmm.v4.ahv.config.SriovNicNetworkInfo" {
+		// For SriovNicNetworkInfo, extract VLAN ID
+		if vlanId, ok := rawNetworkInfo["vlanId"].(float64); ok {
+			nic["vlan_id"] = int(vlanId)
+			log.Printf("[DEBUG] flattenPolymorphicNicNetworkInfo: Found VLAN ID %d in SriovNicNetworkInfo", int(vlanId))
+		} else {
+			nic["vlan_id"] = 0
+		}
+	} else if objectType == "vmm.v4.ahv.config.VirtualEthernetNicNetworkInfo" {
+		// For VirtualEthernetNicNetworkInfo, handle IP configuration and other fields
+		if ipv4Config, ok := rawNetworkInfo["ipv4Config"].(map[string]interface{}); ok {
+			nic["ipv4_config"] = flattenIPv4ConfigFromRaw(ipv4Config)
+		}
+
+		if ipv4Info, ok := rawNetworkInfo["ipv4Info"].(map[string]interface{}); ok {
+			nic["ipv4_info"] = flattenIPv4InfoFromRaw(ipv4Info)
+		}
+
+		// VirtualEthernetNicNetworkInfo doesn't have vlan_id, don't set it
+	}
+
+	// Handle network function chain if present
+	if networkFunctionChain, ok := rawNetworkInfo["networkFunctionChain"].(map[string]interface{}); ok {
+		nic["network_function_chain"] = flattenNetworkFunctionChainFromRaw(networkFunctionChain)
+	}
+
+	if networkFunctionNicType, ok := rawNetworkInfo["networkFunctionNicType"].(string); ok {
+		nic["network_function_nic_type"] = networkFunctionNicType
+	}
+
+	if shouldAllowUnknownMacs, ok := rawNetworkInfo["shouldAllowUnknownMacs"].(bool); ok {
+		nic["should_allow_unknown_macs"] = shouldAllowUnknownMacs
+	}
+
+	nicList = append(nicList, nic)
+	return nicList
+}
+
+// Helper function to convert NicType integer to string
+func flattenNicTypeFromInt(nicType int) string {
+	switch nicType {
+	case 2:
+		return "NORMAL_NIC"
+	case 3:
+		return "DIRECT_NIC"
+	case 4:
+		return "NETWORK_FUNCTION_NIC"
+	case 5:
+		return "SPAN_DESTINATION_NIC"
+	default:
+		return "UNKNOWN"
+	}
+}
+
+// Helper functions for flattening raw interface{} data
+func flattenIPv4ConfigFromRaw(ipv4Config map[string]interface{}) []map[string]interface{} {
+	config := make(map[string]interface{})
+	
+	if ipAddress, ok := ipv4Config["ipAddress"].(map[string]interface{}); ok {
+		if value, ok := ipAddress["value"].(string); ok {
+			config["ip_address"] = []map[string]interface{}{
+				{"value": value},
+			}
+		}
+	}
+
+	if secondaryIpAddressList, ok := ipv4Config["secondaryIpAddressList"].([]interface{}); ok {
+		config["secondary_ip_address_list"] = secondaryIpAddressList
+	}
+
+	return []map[string]interface{}{config}
+}
+
+func flattenIPv4InfoFromRaw(ipv4Info map[string]interface{}) []map[string]interface{} {
+	info := make(map[string]interface{})
+	
+	if ipAddress, ok := ipv4Info["ipAddress"].(map[string]interface{}); ok {
+		if value, ok := ipAddress["value"].(string); ok {
+			info["ip_address"] = []map[string]interface{}{
+				{"value": value},
+			}
+		}
+	}
+
+	return []map[string]interface{}{info}
+}
+
+func flattenNetworkFunctionChainFromRaw(networkFunctionChain map[string]interface{}) []map[string]interface{} {
+	chain := make(map[string]interface{})
+	
+	if extId, ok := networkFunctionChain["extId"].(string); ok {
+		chain["ext_id"] = extId
+	}
+
+	return []map[string]interface{}{chain}
 }
 
 func flattenNicType(pr *config.NicType) string {

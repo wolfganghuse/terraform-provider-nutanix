@@ -1106,6 +1106,10 @@ func ResourceNutanixVirtualMachineV2() *schema.Resource {
 										Computed: true,
 										Elem: &schema.Resource{
 											Schema: map[string]*schema.Schema{
+												"device_ext_id": {
+													Type:     schema.TypeString,
+													Computed: true,
+												},
 												"segment": {
 													Type:     schema.TypeInt,
 													Computed: true,
@@ -3855,14 +3859,49 @@ func waitForIPRefreshFunc(client *vmm.Client, vmUUID string) resource.StateRefre
 		getResp := resp.Data.GetValue().(config.Vm)
 
 		if getResp.Nics != nil && len(getResp.Nics) > 0 {
+			hasNicsNeedingIP := false
+			hasNicsWithIP := false
+
 			for _, nic := range getResp.Nics {
-				if nic.NetworkInfo.Ipv4Info != nil {
-					for _, ip := range nic.NetworkInfo.Ipv4Info.LearnedIpAddresses {
-						if ip.Value != nil {
-							return resp, "AVAILABLE", nil
+				// Handle nil NetworkInfo for SR-IOV NICs or other cases
+				if nic.NetworkInfo != nil {
+					// Check if this is a DIRECT_NIC (SR-IOV) that doesn't need IP assignment
+					if nic.NetworkInfo.NicType != nil && *nic.NetworkInfo.NicType == config.NicType(3) { // DIRECT_NIC
+						// SR-IOV NICs typically don't get IP addresses assigned at hypervisor level
+						// Check if IP assignment is explicitly enabled
+						needsIP := false
+						if nic.NetworkInfo.Ipv4Config != nil && nic.NetworkInfo.Ipv4Config.ShouldAssignIp != nil && *nic.NetworkInfo.Ipv4Config.ShouldAssignIp {
+							needsIP = true
+							hasNicsNeedingIP = true
+						}
+						
+						// If SR-IOV NIC needs IP, check for it
+						if needsIP && nic.NetworkInfo.Ipv4Info != nil {
+							for _, ip := range nic.NetworkInfo.Ipv4Info.LearnedIpAddresses {
+								if ip.Value != nil {
+									hasNicsWithIP = true
+									break
+								}
+							}
+						}
+					} else {
+						// Regular NIC - check for IP assignment
+						hasNicsNeedingIP = true
+						if nic.NetworkInfo.Ipv4Info != nil {
+							for _, ip := range nic.NetworkInfo.Ipv4Info.LearnedIpAddresses {
+								if ip.Value != nil {
+									hasNicsWithIP = true
+									break
+								}
+							}
 						}
 					}
 				}
+			}
+
+			// If we have NICs that need IP and at least one has IP, or no NICs need IP, we're available
+			if !hasNicsNeedingIP || hasNicsWithIP {
+				return resp, "AVAILABLE", nil
 			}
 		}
 		return resp, "WAITING", nil
@@ -3905,13 +3944,9 @@ func expandVMNic(pr []interface{}) []config.Nic {
 
 				// SR-IOV NICs use DIRECT_NIC type and may include vlan_id configuration
 				if nicType, ok := ntwkData["nic_type"]; ok && nicType == "DIRECT_NIC" {
-					if _, hasVlan := ntwkData["vlan_id"]; hasVlan {
-						// Use SriovNicNetworkInfo for SR-IOV NICs with VLAN configuration
-						nic.NicNetworkInfo = expandSriovNicNetworkInfo(ntwkInfo)
-					} else {
-						// Use VirtualEthernetNicNetworkInfo for DIRECT_NIC without VLAN
-						nic.NicNetworkInfo = expandRegularNicNetworkInfo(ntwkInfo)
-					}
+					// For SR-IOV NICs, always use VirtualEthernetNicNetworkInfo with DIRECT_NIC type
+					// The VLAN configuration will be handled within the VirtualEthernetNicNetworkInfo structure
+					nic.NicNetworkInfo = expandRegularNicNetworkInfo(ntwkInfo)
 				} else {
 					// Use VirtualEthernetNicNetworkInfo for non-DIRECT NICs
 					nic.NicNetworkInfo = expandRegularNicNetworkInfo(ntwkInfo)
@@ -4059,8 +4094,20 @@ func expandSriovNicNetworkInfo(pr interface{}) *config.OneOfNicNicNetworkInfo {
 
 // expandRegularNicNetworkInfo creates a OneOfNicNicNetworkInfo with VirtualEthernetNicNetworkInfo for regular NICs.
 // This converts the standard NicNetworkInfo to the polymorphic VirtualEthernetNicNetworkInfo type.
+// It also handles SR-IOV specific fields like vlan_id when used with DIRECT_NIC type.
 func expandRegularNicNetworkInfo(pr interface{}) *config.OneOfNicNicNetworkInfo {
 	if len(pr.([]interface{})) > 0 {
+		prI := pr.([]interface{})
+		val := prI[0].(map[string]interface{})
+
+		// Check if this is a DIRECT_NIC with non-zero vlan_id - if so, use SriovNicNetworkInfo which supports VLAN configuration
+		if nicType, hasNicType := val["nic_type"]; hasNicType && nicType == "DIRECT_NIC" {
+			if vlanId, hasVlanId := val["vlan_id"]; hasVlanId && vlanId.(int) > 0 {
+				// Use SriovNicNetworkInfo for SR-IOV NICs with VLAN configuration
+				return expandSriovNicNetworkInfo(pr)
+			}
+		}
+
 		// Create regular NicNetworkInfo using the existing function from template_deploy
 		regularNetworkInfo := expandNicNetworkInfo(pr)
 

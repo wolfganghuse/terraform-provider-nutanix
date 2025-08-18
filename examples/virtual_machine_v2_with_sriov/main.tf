@@ -90,16 +90,24 @@ resource "nutanix_virtual_machine_v2" "example-4" {
       }
     }
   }
+
+  nics {
+    network_info {
+      nic_type = "NORMAL_NIC"
+      subnet {
+        ext_id = data.nutanix_subnets_v2.vm-subnet.subnets[0].ext_id
+      }
+      vlan_mode = "ACCESS"
+    }
+  }
   nics {
     network_info {
       nic_type = "DIRECT_NIC"
       vlan_id = 2000  # VLAN ID for SR-IOV NIC
-      subnet {
-        ext_id = data.nutanix_subnets_v2.vm-subnet.subnets[0].ext_id
-      }
       ipv4_config {
         should_assign_ip = false
       }
+
     }
     backing_info {
       is_connected = true
@@ -108,7 +116,7 @@ resource "nutanix_virtual_machine_v2" "example-4" {
       }
     }
   }
-  power_state = "OFF"
+  power_state = "ON"
 }
 
 
@@ -129,10 +137,12 @@ data "nutanix_virtual_machines_v2" "sriov_vm_search" {
   limit  = 1
 }
 
-# get detailed SR-IOV VM info using ext_id from search
+# get detailed SR-IOV VM info using ext_id from search - TEMPORARILY COMMENTED OUT DUE TO SCHEMA ISSUE
+/*
 data "nutanix_virtual_machine_v2" "sriov_vm" {
   ext_id = length(data.nutanix_virtual_machines_v2.sriov_vm_search.vms) > 0 ? data.nutanix_virtual_machines_v2.sriov_vm_search.vms[0].ext_id : null
 }
+*/
 
 # Output to demonstrate SR-IOV detection - COMMENTED OUT SINCE VM CREATION IS DISABLED
 /*
@@ -158,25 +168,26 @@ output "created_vm_nics" {
 */
 
 # Output to demonstrate SR-IOV detection on existing SR-IOV VM
+# Output to demonstrate SR-IOV detection - TEMPORARILY COMMENTED OUT DUE TO SCHEMA ISSUE
+/*
 output "sriov_vm_nics" {
-  description = "NIC information for existing SR-IOV VM demonstrating enhanced detection"
+  description = "NIC information from search and detailed lookup"
   value = length(data.nutanix_virtual_machines_v2.sriov_vm_search.vms) > 0 ? [
     for nic in data.nutanix_virtual_machine_v2.sriov_vm.nics : {
-      ext_id          = nic.ext_id
-      nic_type        = try(nic.network_info[0].nic_type, "unknown")
-      model           = try(nic.backing_info[0].model, "unknown")
-      mac_address     = try(nic.backing_info[0].mac_address, "unknown")
-      is_connected    = try(nic.backing_info[0].is_connected, false)
-      num_queues      = try(nic.backing_info[0].num_queues, 0)
-      sriov_enabled   = try(nic.backing_info[0].sriov_enabled, false)
-      is_pass_through = try(nic.backing_info[0].is_pass_through, false)
-      physical_address = try(nic.backing_info[0].physical_address, [])
-      nic_profile_ext_id = try(nic.backing_info[0].nic_profile_reference[0].ext_id, "")
-      vlan_mode       = try(nic.network_info[0].vlan_mode, "unknown")
-      trunked_vlans   = try(nic.network_info[0].trunked_vlans, [])
+      ext_id             = nic.ext_id
+      nic_type           = length(nic.network_info) > 0 ? nic.network_info[0].nic_type : "unknown"
+      mac_address        = length(nic.backing_info) > 0 ? nic.backing_info[0].mac_address : ""
+      is_connected       = length(nic.backing_info) > 0 ? nic.backing_info[0].is_connected : false
+      is_pass_through    = length(nic.backing_info) > 0 ? nic.backing_info[0].is_pass_through : false
+      sriov_enabled      = length(nic.backing_info) > 0 ? nic.backing_info[0].sriov_enabled : false
+      nic_profile_ext_id = length(nic.backing_info) > 0 && length(nic.backing_info[0].nic_profile_reference) > 0 ? nic.backing_info[0].nic_profile_reference[0].ext_id : ""
+      vlan_mode          = length(nic.network_info) > 0 ? nic.network_info[0].vlan_mode : ""
+      trunked_vlans      = length(nic.network_info) > 0 ? nic.network_info[0].trunked_vlans : []
+      physical_address   = length(nic.backing_info) > 0 ? nic.backing_info[0].physical_address : []
     }
   ] : []
 }
+*/
 
 # Compare SR-IOV capabilities between VMs - COMMENTED OUT SINCE VM CREATION IS DISABLED
 /*

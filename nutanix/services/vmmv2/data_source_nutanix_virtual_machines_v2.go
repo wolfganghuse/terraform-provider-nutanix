@@ -1235,6 +1235,10 @@ func DatasourceNutanixVirtualMachinesV4() *schema.Resource {
 														},
 													},
 												},
+												"vlan_id": {
+													Type:     schema.TypeInt,
+													Computed: true,
+												},
 											},
 										},
 									},

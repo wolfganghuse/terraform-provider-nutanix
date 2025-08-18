@@ -1,0 +1,9 @@
+provider_installation {
+  # Point this provider address to your local build directory
+  dev_overrides {
+    "nutanix/nutanix" = "/Users/wolfgang.huse/go/bin/"
+  }
+
+  # Allow everything else to come from the network as usual
+  direct {}
+}
