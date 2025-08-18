@@ -52,16 +52,24 @@ data "nutanix_images_v2" "vm-image" {
 # pull NIC profiles data for SR-IOV
 data "nutanix_nic_profiles_v2" "sriov_profiles" {}
 
+
 locals {
+  # Filter for SR-IOV profiles by name
   sriov_profiles = [
     for profile in data.nutanix_nic_profiles_v2.sriov_profiles.nic_profiles : profile
-    if length(profile.capabilities) > 0 && profile.capabilities[0].capability_type == "SRIOV"
+    if length(profile.capabilities) > 0 &&
+       profile.capabilities[0].capability_type == "SRIOV"
   ]
-  # Use the first available SR-IOV profile, or fallback to hardcoded value
-  # Select the appropriate SR-IOV profile (use index 1 for sr-iov-cx-6-dx-default)
-  sriov_profile_id = length(local.sriov_profiles) > 0 ? local.sriov_profiles[1].ext_id : "fbaa79db-1237-411f-a96f-9b95778e65d0"
+  
+  # Select the specific SR-IOV profile by name
+  sriov_profile_by_name = [
+    for profile in local.sriov_profiles : profile
+    if profile.name == "sr-iov-cx-6-dx-default"
+  ]
+  
+  # Use the named profile if found, otherwise fallback to first available SR-IOV profile
+  sriov_profile_id = length(local.sriov_profile_by_name) > 0 ? local.sriov_profile_by_name[0].ext_id : local.sriov_profiles[0].ext_id
 }
-
 #pull all categories data
 data "nutanix_categories_v2" "categories-list" {}
 
