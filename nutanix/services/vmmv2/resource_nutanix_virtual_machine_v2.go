@@ -1685,7 +1685,7 @@ func ResourceNutanixVirtualMachineV2Create(ctx context.Context, d *schema.Resour
 		body.CdRoms = expandCdRom(cdroms.([]interface{}))
 	}
 	if nics, ok := d.GetOk("nics"); ok {
-		body.Nics = expandVmNic(nics.([]interface{}))
+		body.Nics = expandVMNic(nics.([]interface{}))
 	}
 	if gpus, ok := d.GetOk("gpus"); ok {
 		body.Gpus = expandGpu(gpus.([]interface{}))
@@ -3869,10 +3869,10 @@ func waitForIPRefreshFunc(client *vmm.Client, vmUUID string) resource.StateRefre
 	}
 }
 
-// expandVmNic expands NIC configuration for VMs, supporting both regular and SR-IOV NICs.
+// expandVMNic expands NIC configuration for VMs, supporting both regular and SR-IOV NICs.
 // It uses polymorphic backing info (EmulatedNic/SriovNic) and network info (VirtualEthernetNicNetworkInfo/SriovNicNetworkInfo)
 // based on the presence of nic_profile_reference and vlan_id configuration.
-func expandVmNic(pr []interface{}) []config.Nic {
+func expandVMNic(pr []interface{}) []config.Nic {
 	if len(pr) > 0 {
 		nicList := make([]config.Nic, len(pr))
 

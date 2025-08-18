@@ -2616,7 +2616,6 @@ func flattenPolymorphicNicBackingInfo(pr interface{}) []map[string]interface{} {
 }
 
 func flattenSriovNic(rawNic map[string]interface{}) []map[string]interface{} {
-
 	nicList := make([]map[string]interface{}, 0)
 	nic := make(map[string]interface{})
 
@@ -2644,9 +2643,9 @@ func flattenSriovNic(rawNic map[string]interface{}) []map[string]interface{} {
 	// Handle NIC profile reference
 	nicProfileRef := []map[string]interface{}{}
 	if sriovProfileRef, ok := rawNic["sriovProfileReference"].(map[string]interface{}); ok {
-		if extId, ok := sriovProfileRef["extId"].(string); ok {
+		if extID, ok := sriovProfileRef["extId"].(string); ok {
 			nicProfileRef = append(nicProfileRef, map[string]interface{}{
-				"ext_id": extId,
+				"ext_id": extID,
 			})
 		}
 	}
@@ -2655,9 +2654,9 @@ func flattenSriovNic(rawNic map[string]interface{}) []map[string]interface{} {
 	// Handle physical address (PCIe device reference)
 	physicalAddress := []map[string]interface{}{}
 	if hostPcieRef, ok := rawNic["hostPcieDeviceReference"].(map[string]interface{}); ok {
-		if extId, ok := hostPcieRef["extId"].(string); ok {
+		if extID, ok := hostPcieRef["extId"].(string); ok {
 			physicalAddress = append(physicalAddress, map[string]interface{}{
-				"device_ext_id": extId,
+				"device_ext_id": extID,
 			})
 		}
 	}
