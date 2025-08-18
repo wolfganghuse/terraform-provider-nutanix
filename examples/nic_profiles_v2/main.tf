@@ -1,16 +1,16 @@
 terraform {
   required_providers {
     nutanix = {
-      source  = "nutanix/nutanix"
-      # Use local development version
+      source = "nutanixtemp/nutanix"
+      version = "1.99.99"
     }
   }
 }
 
 provider "nutanix" {
-  username = var.user
-  password = var.password
-  endpoint = var.endpoint
+  username = var.nutanix_username
+  password = var.nutanix_password
+  endpoint = var.nutanix_endpoint
   insecure = true
   port     = "9440"
 }
@@ -31,17 +31,3 @@ output "sriov_profiles" {
   ]
 }
 
-variable "user" {
-  description = "Nutanix username"
-  type        = string
-}
-
-variable "password" {
-  description = "Nutanix password"
-  type        = string
-}
-
-variable "endpoint" {
-  description = "Nutanix endpoint"
-  type        = string
-}
