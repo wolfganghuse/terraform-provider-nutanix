@@ -14,6 +14,7 @@ type Client struct {
 	SubnetAPIInstance     *api.SubnetsApi
 	VpcAPIInstance        *api.VpcsApi
 	FloatingIPAPIInstance *api.FloatingIpsApi
+	NicProfilesAPI        *api.NicProfilesApi
 }
 
 func NewNetworkingClient(credentials client.Credentials) (*Client, error) {
@@ -39,6 +40,7 @@ func NewNetworkingClient(credentials client.Credentials) (*Client, error) {
 		SubnetAPIInstance:     api.NewSubnetsApi(baseClient),
 		VpcAPIInstance:        api.NewVpcsApi(baseClient),
 		FloatingIPAPIInstance: api.NewFloatingIpsApi(baseClient),
+		NicProfilesAPI:        api.NewNicProfilesApi(baseClient),
 	}
 
 	return f, nil

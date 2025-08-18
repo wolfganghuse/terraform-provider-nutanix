@@ -256,6 +256,7 @@ func Provider() *schema.Provider {
 			"nutanix_service_groups_v2":                       networkingv2.DatasourceNutanixServiceGroupsV2(),
 			"nutanix_address_group_v2":                        networkingv2.DatasourceNutanixAddressGroupV2(),
 			"nutanix_address_groups_v2":                       networkingv2.DatasourceNutanixAddressGroupsV2(),
+			"nutanix_nic_profiles_v2":                         networkingv2.DataSourceNutanixNicProfilesV2(),
 			"nutanix_directory_service_v2":                    iamv2.DatasourceNutanixDirectoryServiceV2(),
 			"nutanix_directory_services_v2":                   iamv2.DatasourceNutanixDirectoryServicesV2(),
 			"nutanix_saml_identity_provider_v2":               iamv2.DatasourceNutanixSamlIDPV2(),

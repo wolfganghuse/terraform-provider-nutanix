@@ -1041,6 +1041,54 @@ func DatasourceNutanixVirtualMachineV4() *schema.Resource {
 										Type:     schema.TypeInt,
 										Computed: true,
 									},
+									"physical_address": {
+										Type:     schema.TypeList,
+										Computed: true,
+										Elem: &schema.Resource{
+											Schema: map[string]*schema.Schema{
+												"segment": {
+													Type:     schema.TypeInt,
+													Computed: true,
+												},
+												"bus": {
+													Type:     schema.TypeInt,
+													Computed: true,
+												},
+												"device": {
+													Type:     schema.TypeInt,
+													Computed: true,
+												},
+												"func": {
+													Type:     schema.TypeInt,
+													Computed: true,
+												},
+												"device_ext_id": {
+													Type:     schema.TypeString,
+													Computed: true,
+												},
+											},
+										},
+									},
+									"sriov_enabled": {
+										Type:     schema.TypeBool,
+										Computed: true,
+									},
+									"is_pass_through": {
+										Type:     schema.TypeBool,
+										Computed: true,
+									},
+									"nic_profile_reference": {
+										Type:     schema.TypeList,
+										Computed: true,
+										Elem: &schema.Resource{
+											Schema: map[string]*schema.Schema{
+												"ext_id": {
+													Type:     schema.TypeString,
+													Computed: true,
+												},
+											},
+										},
+									},
 								},
 							},
 						},
@@ -2432,17 +2480,190 @@ func flattenNic(nic []config.Nic) []interface{} {
 			if v.ExtId != nil {
 				nics["ext_id"] = v.ExtId
 			}
-			if v.BackingInfo != nil {
-				nics["backing_info"] = flattenEmulatedNic(v.BackingInfo)
+			// Handle backing_info - create it even if nil for SR-IOV detection
+			var backingInfo []map[string]interface{}
+			if v.NicBackingInfo != nil {
+				backingInfo = flattenPolymorphicNicBackingInfo(v.NicBackingInfo)
+
+				// If flattenPolymorphicNicBackingInfo returns nil (empty NicBackingInfo), create structure
+				if backingInfo == nil {
+					backingInfo = []map[string]interface{}{
+						{
+							"model":                 "",
+							"mac_address":           "",
+							"is_connected":          false,
+							"num_queues":            0,
+							"physical_address":      []map[string]interface{}{},
+							"sriov_enabled":         false,
+							"is_pass_through":       false,
+							"nic_profile_reference": []map[string]interface{}{},
+						},
+					}
+				}
+			} else {
+				// Create empty backing_info structure for DIRECT_NIC or disconnected NICs
+				backingInfo = []map[string]interface{}{
+					{
+						"model":                 "",
+						"mac_address":           "",
+						"is_connected":          false,
+						"num_queues":            0,
+						"physical_address":      []map[string]interface{}{},
+						"sriov_enabled":         false,
+						"is_pass_through":       false,
+						"nic_profile_reference": []map[string]interface{}{},
+					},
+				}
 			}
+
+			// Enhance backing info with SR-IOV capabilities based on nic_type
+			if len(backingInfo) > 0 {
+				backingInfoMap := backingInfo[0]
+				var nicType string
+
+				if v.NetworkInfo != nil && v.NetworkInfo.NicType != nil {
+					nicType = flattenNicType(v.NetworkInfo.NicType)
+				} else {
+					// Handle case where NetworkInfo is empty/nil
+					// This often happens with disconnected DIRECT_NIC interfaces
+					// If BackingInfo is also nil, it's likely a DIRECT_NIC
+					if v.BackingInfo == nil {
+						nicType = "DIRECT_NIC"
+					} else {
+						nicType = "UNKNOWN"
+					}
+				}
+
+				switch nicType {
+				case "DIRECT_NIC":
+					backingInfoMap["is_pass_through"] = true
+					backingInfoMap["sriov_enabled"] = true
+				case "NORMAL_NIC":
+					backingInfoMap["is_pass_through"] = false
+					backingInfoMap["sriov_enabled"] = false
+				default:
+					backingInfoMap["is_pass_through"] = false
+					backingInfoMap["sriov_enabled"] = false
+				}
+			}
+
+			nics["backing_info"] = backingInfo
+
 			if v.NetworkInfo != nil {
 				nics["network_info"] = flattenNicNetworkInfo(v.NetworkInfo)
+			} else {
+				// Create network_info structure for disconnected NICs with inferred type
+				var inferredNicType string
+				if v.BackingInfo == nil {
+					inferredNicType = "DIRECT_NIC"
+				} else {
+					inferredNicType = "UNKNOWN"
+				}
+
+				nics["network_info"] = []map[string]interface{}{
+					{
+						"nic_type":                  inferredNicType,
+						"network_function_nic_type": "",
+						"should_allow_unknown_macs": false,
+						"vlan_mode":                 "",
+						"subnet":                    []map[string]interface{}{},
+						"trunked_vlans":             []interface{}{},
+						"ipv4_config":               []map[string]interface{}{},
+						"ipv4_info":                 []map[string]interface{}{},
+						"network_function_chain":    []map[string]interface{}{},
+					},
+				}
 			}
 			nicList[k] = nics
 		}
 		return nicList
 	}
 	return nil
+}
+
+func flattenPolymorphicNicBackingInfo(pr interface{}) []map[string]interface{} {
+	if pr == nil {
+		return nil
+	}
+
+	// Try to handle EmulatedNic first (existing logic)
+	if emulatedNic, ok := pr.(*config.EmulatedNic); ok {
+		return flattenEmulatedNic(emulatedNic)
+	}
+
+	// Handle potential SriovNic or other types by using reflection/type assertion
+	// Since we don't have direct access to SriovNic type, we'll handle it as interface{}
+	// and extract fields using JSON marshaling/unmarshaling
+	jsonBytes, err := json.Marshal(pr)
+	if err != nil {
+		return flattenEmulatedNic(nil) // Fallback to empty structure
+	}
+
+	var rawNic map[string]interface{}
+	if err := json.Unmarshal(jsonBytes, &rawNic); err != nil {
+		return flattenEmulatedNic(nil) // Fallback to empty structure
+	}
+
+	// Check if this is a SriovNic based on $objectType
+	objectType, _ := rawNic["$objectType"].(string)
+
+	if objectType == "vmm.v4.ahv.config.SriovNic" {
+		return flattenSriovNic(rawNic)
+	}
+
+	// Default to EmulatedNic handling for unknown types
+	return flattenEmulatedNic(nil)
+}
+
+func flattenSriovNic(rawNic map[string]interface{}) []map[string]interface{} {
+	nicList := make([]map[string]interface{}, 0)
+	nic := make(map[string]interface{})
+
+	// Extract basic fields
+	if macAddress, ok := rawNic["macAddress"].(string); ok {
+		nic["mac_address"] = macAddress
+	} else {
+		nic["mac_address"] = ""
+	}
+
+	if isConnected, ok := rawNic["isConnected"].(bool); ok {
+		nic["is_connected"] = isConnected
+	} else {
+		nic["is_connected"] = false
+	}
+
+	// SR-IOV NICs typically don't have a model field like EmulatedNic
+	nic["model"] = ""
+	nic["num_queues"] = 0 // SR-IOV queues are handled differently
+
+	// SR-IOV specific fields
+	nic["sriov_enabled"] = true
+	nic["is_pass_through"] = true
+
+	// Handle NIC profile reference
+	nicProfileRef := []map[string]interface{}{}
+	if sriovProfileRef, ok := rawNic["sriovProfileReference"].(map[string]interface{}); ok {
+		if extID, ok := sriovProfileRef["extId"].(string); ok {
+			nicProfileRef = append(nicProfileRef, map[string]interface{}{
+				"ext_id": extID,
+			})
+		}
+	}
+	nic["nic_profile_reference"] = nicProfileRef
+
+	// Handle physical address (PCIe device reference)
+	physicalAddress := []map[string]interface{}{}
+	if hostPcieRef, ok := rawNic["hostPcieDeviceReference"].(map[string]interface{}); ok {
+		if extID, ok := hostPcieRef["extId"].(string); ok {
+			physicalAddress = append(physicalAddress, map[string]interface{}{
+				"device_ext_id": extID,
+			})
+		}
+	}
+	nic["physical_address"] = physicalAddress
+
+	nicList = append(nicList, nic)
+	return nicList
 }
 
 func flattenEmulatedNic(pr *config.EmulatedNic) []map[string]interface{} {
@@ -2462,6 +2683,13 @@ func flattenEmulatedNic(pr *config.EmulatedNic) []map[string]interface{} {
 		if pr.NumQueues != nil {
 			nic["num_queues"] = pr.NumQueues
 		}
+
+		// Set default values for SR-IOV related fields for EmulatedNic
+		// Physical address is empty for emulated NICs
+		nic["physical_address"] = []map[string]interface{}{}
+		nic["sriov_enabled"] = false
+		nic["is_pass_through"] = false
+		nic["nic_profile_reference"] = []map[string]interface{}{}
 
 		nicList = append(nicList, nic)
 		return nicList
