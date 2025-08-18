@@ -2649,7 +2649,6 @@ func flattenSriovNic(rawNic map[string]interface{}) []map[string]interface{} {
 				"ext_id": extId,
 			})
 		}
-	} else {
 	}
 	nic["nic_profile_reference"] = nicProfileRef
 
