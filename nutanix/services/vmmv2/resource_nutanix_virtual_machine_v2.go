@@ -3962,7 +3962,7 @@ func expandSriovNicBackingInfo(pr interface{}) *config.OneOfNicNicBackingInfo {
 			} else {
 				mac = "unknown"
 			}
-			log.Printf("[ERROR] SR-IOV NIC (index: %d, mac_address: %s) requires nic_profile_reference with ext_id", idx, mac)
+			log.Printf("[ERROR] SR-IOV NIC (mac_address: %s) requires nic_profile_reference with ext_id", mac)
 			return nil
 		}
 
