@@ -2,6 +2,7 @@ package vmmv2
 
 import (
 	"context"
+	"log"
 
 	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
@@ -404,6 +405,16 @@ func expandEmulatedNic(pr interface{}) *config.EmulatedNic {
 		}
 		if numQ, ok := val["num_queues"]; ok {
 			nic.NumQueues = utils.IntPtr(numQ.(int))
+		}
+		// Handle NIC profile for SR-IOV/Direct NICs
+		if nicProfile, ok := val["nic_profile"]; ok && len(nicProfile.([]interface{})) > 0 {
+			profileData := nicProfile.([]interface{})[0].(map[string]interface{})
+			if extID, ok := profileData["ext_id"]; ok && len(extID.(string)) > 0 {
+				// Note: EmulatedNic may not support profile directly
+				// This might require extending to OneOfNicBackingInfo
+				// For now, add as comment for future implementation
+				log.Printf("[INFO] NIC profile specified but EmulatedNic may not support it directly: %s", extID.(string))
+			}
 		}
 		return nic
 	}

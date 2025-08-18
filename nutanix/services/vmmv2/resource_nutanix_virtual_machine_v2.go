@@ -1087,6 +1087,66 @@ func ResourceNutanixVirtualMachineV2() *schema.Resource {
 										Optional: true,
 										Default:  1,
 									},
+									"nic_profile": {
+										Type:     schema.TypeList,
+										Optional: true,
+										Computed: true,
+										Elem: &schema.Resource{
+											Schema: map[string]*schema.Schema{
+												"ext_id": {
+													Type:     schema.TypeString,
+													Optional: true,
+													Computed: true,
+												},
+											},
+										},
+									},
+									"physical_address": {
+										Type:     schema.TypeList,
+										Computed: true,
+										Elem: &schema.Resource{
+											Schema: map[string]*schema.Schema{
+												"segment": {
+													Type:     schema.TypeInt,
+													Computed: true,
+												},
+												"bus": {
+													Type:     schema.TypeInt,
+													Computed: true,
+												},
+												"device": {
+													Type:     schema.TypeInt,
+													Computed: true,
+												},
+												"func": {
+													Type:     schema.TypeInt,
+													Computed: true,
+												},
+											},
+										},
+									},
+									"sriov_enabled": {
+										Type:     schema.TypeBool,
+										Computed: true,
+									},
+									"is_pass_through": {
+										Type:     schema.TypeBool,
+										Computed: true,
+									},
+									"nic_profile_reference": {
+										Type:     schema.TypeList,
+										Optional: true,
+										Computed: true,
+										MaxItems: 1,
+										Elem: &schema.Resource{
+											Schema: map[string]*schema.Schema{
+												"ext_id": {
+													Type:     schema.TypeString,
+													Required: true,
+												},
+											},
+										},
+									},
 								},
 							},
 						},
@@ -1104,6 +1164,11 @@ func ResourceNutanixVirtualMachineV2() *schema.Resource {
 											"SPAN_DESTINATION_NIC",
 											"NORMAL_NIC", "DIRECT_NIC", "NETWORK_FUNCTION_NIC",
 										}, false),
+									},
+									"vlan_id": {
+										Type:        schema.TypeInt,
+										Optional:    true,
+										Description: "VLAN ID for SR-IOV NIC network info",
 									},
 									"network_function_chain": {
 										Type:     schema.TypeList,
@@ -1620,7 +1685,7 @@ func ResourceNutanixVirtualMachineV2Create(ctx context.Context, d *schema.Resour
 		body.CdRoms = expandCdRom(cdroms.([]interface{}))
 	}
 	if nics, ok := d.GetOk("nics"); ok {
-		body.Nics = expandNic(nics.([]interface{}))
+		body.Nics = expandVmNic(nics.([]interface{}))
 	}
 	if gpus, ok := d.GetOk("gpus"); ok {
 		body.Gpus = expandGpu(gpus.([]interface{}))
@@ -3802,4 +3867,220 @@ func waitForIPRefreshFunc(client *vmm.Client, vmUUID string) resource.StateRefre
 		}
 		return resp, "WAITING", nil
 	}
+}
+
+// expandVmNic expands NIC configuration for VMs, supporting both regular and SR-IOV NICs.
+// It uses polymorphic backing info (EmulatedNic/SriovNic) and network info (VirtualEthernetNicNetworkInfo/SriovNicNetworkInfo)
+// based on the presence of nic_profile_reference and vlan_id configuration.
+func expandVmNic(pr []interface{}) []config.Nic {
+	if len(pr) > 0 {
+		nicList := make([]config.Nic, len(pr))
+
+		for k, v := range pr {
+			nic := config.Nic{}
+
+			val := v.(map[string]interface{})
+
+			if extID, ok := val["ext_id"]; ok && len(extID.(string)) > 0 {
+				nic.ExtId = utils.StringPtr(extID.(string))
+			}
+
+			// Handle backing_info - determine NIC type based on presence of nic_profile_reference
+			if backingInfo, ok := val["backing_info"]; ok && len(backingInfo.([]interface{})) > 0 {
+				backingData := backingInfo.([]interface{})[0].(map[string]interface{})
+
+				// SR-IOV NICs require nic_profile_reference, regular NICs do not
+				if nicProfileRef, hasProfile := backingData["nic_profile_reference"]; hasProfile && len(nicProfileRef.([]interface{})) > 0 {
+					// Create SriovNic for NICs with profile reference
+					nic.NicBackingInfo = expandSriovNicBackingInfo(backingInfo)
+				} else {
+					// Create VirtualEthernetNic for regular NICs
+					nic.NicBackingInfo = expandEmulatedNicBackingInfo(backingInfo)
+				}
+			}
+
+			// Handle network_info - determine network type based on nic_type and vlan_id presence
+			if ntwkInfo, ok := val["network_info"]; ok && len(ntwkInfo.([]interface{})) > 0 {
+				ntwkData := ntwkInfo.([]interface{})[0].(map[string]interface{})
+
+				// SR-IOV NICs use DIRECT_NIC type and may include vlan_id configuration
+				if nicType, ok := ntwkData["nic_type"]; ok && nicType == "DIRECT_NIC" {
+					if _, hasVlan := ntwkData["vlan_id"]; hasVlan {
+						// Use SriovNicNetworkInfo for SR-IOV NICs with VLAN configuration
+						nic.NicNetworkInfo = expandSriovNicNetworkInfo(ntwkInfo)
+					} else {
+						// Use VirtualEthernetNicNetworkInfo for DIRECT_NIC without VLAN
+						nic.NicNetworkInfo = expandRegularNicNetworkInfo(ntwkInfo)
+					}
+				} else {
+					// Use VirtualEthernetNicNetworkInfo for non-DIRECT NICs
+					nic.NicNetworkInfo = expandRegularNicNetworkInfo(ntwkInfo)
+				}
+			}
+
+			nicList[k] = nic
+		}
+		return nicList
+	}
+	return nil
+}
+
+// expandSriovNicBackingInfo creates a OneOfNicNicBackingInfo with SriovNic for SR-IOV NICs.
+// SR-IOV NICs require a nic_profile_reference that specifies the SR-IOV profile to use.
+func expandSriovNicBackingInfo(pr interface{}) *config.OneOfNicNicBackingInfo {
+	if len(pr.([]interface{})) > 0 {
+		prI := pr.([]interface{})
+		val := prI[0].(map[string]interface{})
+
+		// Use the proper constructor to initialize SriovNic with correct ObjectType_
+		sriovNic := config.NewSriovNic()
+
+		// Set default connection state for SR-IOV NICs
+		if isConn, ok := val["is_connected"]; ok {
+			sriovNic.IsConnected = utils.BoolPtr(isConn.(bool))
+		} else {
+			// Default to true for SR-IOV NICs if not specified
+			sriovNic.IsConnected = utils.BoolPtr(true)
+		}
+
+		if macAdd, ok := val["mac_address"]; ok && len(macAdd.(string)) > 0 {
+			sriovNic.MacAddress = utils.StringPtr(macAdd.(string))
+		}
+
+		// Handle SR-IOV profile reference - this is required for SR-IOV NICs
+		if nicProfile, ok := val["nic_profile_reference"]; ok && len(nicProfile.([]interface{})) > 0 {
+			profileData := nicProfile.([]interface{})[0].(map[string]interface{})
+			if extID, ok := profileData["ext_id"]; ok && len(extID.(string)) > 0 {
+				sriovNic.SriovProfileReference = &config.NicProfileReference{
+					ExtId: utils.StringPtr(extID.(string)),
+				}
+			}
+		} else {
+			log.Printf("[ERROR] SR-IOV NIC requires nic_profile_reference with ext_id")
+			return nil
+		}
+
+		// Validate that required fields are set before creating OneOf
+		if sriovNic.SriovProfileReference == nil || sriovNic.SriovProfileReference.ExtId == nil {
+			log.Printf("[ERROR] SriovNic.SriovProfileReference.ExtId is required but not set")
+			return nil
+		}
+
+		// Create OneOfNicNicBackingInfo and set SriovNic
+		backingInfo := &config.OneOfNicNicBackingInfo{}
+		err := backingInfo.SetValue(*sriovNic) // Dereference the pointer
+		if err != nil {
+			log.Printf("[ERROR] Failed to set SriovNic in backing info: %v", err)
+			return nil
+		}
+
+		return backingInfo
+	}
+	return nil
+}
+
+// expandEmulatedNicBackingInfo creates a OneOfNicNicBackingInfo with VirtualEthernetNic for regular NICs.
+// VirtualEthernetNic is used for emulated NICs (VIRTIO, E1000) that don't require SR-IOV profiles.
+func expandEmulatedNicBackingInfo(pr interface{}) *config.OneOfNicNicBackingInfo {
+	if len(pr.([]interface{})) > 0 {
+		prI := pr.([]interface{})
+		val := prI[0].(map[string]interface{})
+
+		// Use the proper constructor to initialize VirtualEthernetNic with correct ObjectType_
+		virtualEthernetNic := config.NewVirtualEthernetNic()
+
+		if model, ok := val["model"]; ok && len(model.(string)) > 0 {
+			// Convert EmulatedNicModel to VirtualEthernetNicModel
+			const two, three = 2, 3
+			subMap := map[string]interface{}{
+				"VIRTIO": two,
+				"E1000":  three,
+			}
+			pVal := subMap[model.(string)]
+			p := config.VirtualEthernetNicModel(pVal.(int))
+			virtualEthernetNic.Model = &p
+		}
+		if macAdd, ok := val["mac_address"]; ok && len(macAdd.(string)) > 0 {
+			virtualEthernetNic.MacAddress = utils.StringPtr(macAdd.(string))
+		}
+		if isConn, ok := val["is_connected"]; ok {
+			virtualEthernetNic.IsConnected = utils.BoolPtr(isConn.(bool))
+		}
+		if numQ, ok := val["num_queues"]; ok {
+			virtualEthernetNic.NumQueues = utils.IntPtr(numQ.(int))
+		}
+
+		// Create OneOfNicNicBackingInfo and set VirtualEthernetNic
+		backingInfo := &config.OneOfNicNicBackingInfo{}
+		err := backingInfo.SetValue(*virtualEthernetNic) // Dereference the pointer
+		if err != nil {
+			log.Printf("[ERROR] Failed to set VirtualEthernetNic in backing info: %v", err)
+			return nil
+		}
+
+		return backingInfo
+	}
+	return nil
+}
+
+// expandSriovNicNetworkInfo creates a OneOfNicNicNetworkInfo with SriovNicNetworkInfo for SR-IOV NICs.
+// SriovNicNetworkInfo supports VLAN configuration (vlan_id) which is specific to SR-IOV NICs.
+func expandSriovNicNetworkInfo(pr interface{}) *config.OneOfNicNicNetworkInfo {
+	if len(pr.([]interface{})) > 0 {
+		prI := pr.([]interface{})
+		val := prI[0].(map[string]interface{})
+
+		// Use the proper constructor to initialize SriovNicNetworkInfo with correct ObjectType_
+		sriovNetworkInfo := config.NewSriovNicNetworkInfo()
+
+		// Handle vlan_id for SR-IOV NICs
+		if vlanID, ok := val["vlan_id"]; ok {
+			sriovNetworkInfo.VlanId = utils.IntPtr(vlanID.(int))
+		}
+
+		// Create OneOfNicNicNetworkInfo and set SriovNicNetworkInfo
+		networkInfo := &config.OneOfNicNicNetworkInfo{}
+		err := networkInfo.SetValue(*sriovNetworkInfo) // Dereference the pointer
+		if err != nil {
+			log.Printf("[ERROR] Failed to set SriovNicNetworkInfo: %v", err)
+			return nil
+		}
+
+		return networkInfo
+	}
+	return nil
+}
+
+// expandRegularNicNetworkInfo creates a OneOfNicNicNetworkInfo with VirtualEthernetNicNetworkInfo for regular NICs.
+// This converts the standard NicNetworkInfo to the polymorphic VirtualEthernetNicNetworkInfo type.
+func expandRegularNicNetworkInfo(pr interface{}) *config.OneOfNicNicNetworkInfo {
+	if len(pr.([]interface{})) > 0 {
+		// Create regular NicNetworkInfo using the existing function from template_deploy
+		regularNetworkInfo := expandNicNetworkInfo(pr)
+
+		// Use the proper constructor to initialize VirtualEthernetNicNetworkInfo with correct ObjectType_
+		virtualEthernetNetworkInfo := config.NewVirtualEthernetNicNetworkInfo()
+
+		// Copy fields from regularNetworkInfo to VirtualEthernetNicNetworkInfo
+		virtualEthernetNetworkInfo.Ipv4Config = regularNetworkInfo.Ipv4Config
+		virtualEthernetNetworkInfo.Ipv4Info = regularNetworkInfo.Ipv4Info
+		virtualEthernetNetworkInfo.NetworkFunctionChain = regularNetworkInfo.NetworkFunctionChain
+		virtualEthernetNetworkInfo.NetworkFunctionNicType = regularNetworkInfo.NetworkFunctionNicType
+		virtualEthernetNetworkInfo.NicType = regularNetworkInfo.NicType
+		virtualEthernetNetworkInfo.ShouldAllowUnknownMacs = regularNetworkInfo.ShouldAllowUnknownMacs
+		virtualEthernetNetworkInfo.Subnet = regularNetworkInfo.Subnet
+		virtualEthernetNetworkInfo.TrunkedVlans = regularNetworkInfo.TrunkedVlans
+		virtualEthernetNetworkInfo.VlanMode = regularNetworkInfo.VlanMode
+
+		// Create OneOfNicNicNetworkInfo and set VirtualEthernetNicNetworkInfo
+		networkInfo := &config.OneOfNicNicNetworkInfo{}
+		err := networkInfo.SetValue(*virtualEthernetNetworkInfo) // Dereference the pointer
+		if err != nil {
+			log.Printf("[ERROR] Failed to set VirtualEthernetNicNetworkInfo: %v", err)
+			return nil
+		}
+
+		return networkInfo
+	}
+	return nil
 }

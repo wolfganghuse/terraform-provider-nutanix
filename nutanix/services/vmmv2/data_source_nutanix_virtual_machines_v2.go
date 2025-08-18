@@ -1063,6 +1063,54 @@ func DatasourceNutanixVirtualMachinesV4() *schema.Resource {
 													Type:     schema.TypeInt,
 													Computed: true,
 												},
+												"physical_address": {
+													Type:     schema.TypeList,
+													Computed: true,
+													Elem: &schema.Resource{
+														Schema: map[string]*schema.Schema{
+															"segment": {
+																Type:     schema.TypeInt,
+																Computed: true,
+															},
+															"bus": {
+																Type:     schema.TypeInt,
+																Computed: true,
+															},
+															"device": {
+																Type:     schema.TypeInt,
+																Computed: true,
+															},
+															"func": {
+																Type:     schema.TypeInt,
+																Computed: true,
+															},
+															"device_ext_id": {
+																Type:     schema.TypeString,
+																Computed: true,
+															},
+														},
+													},
+												},
+												"sriov_enabled": {
+													Type:     schema.TypeBool,
+													Computed: true,
+												},
+												"is_pass_through": {
+													Type:     schema.TypeBool,
+													Computed: true,
+												},
+												"nic_profile_reference": {
+													Type:     schema.TypeList,
+													Computed: true,
+													Elem: &schema.Resource{
+														Schema: map[string]*schema.Schema{
+															"ext_id": {
+																Type:     schema.TypeString,
+																Computed: true,
+															},
+														},
+													},
+												},
 											},
 										},
 									},
