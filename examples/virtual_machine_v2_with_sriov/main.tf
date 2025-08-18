@@ -1,14 +1,8 @@
-#Here we will create a VM with SR-IOV NIC capabilities
-#This example demonstrates the enhanced SR-IOV support in the Nutanix provider
-#using the VMM API v4.1 with polymorphic NIC handling and NIC profiles.
-#The variable values are present in terraform.tfvars file.
-#Note - Replace appropriate values of variables in terraform.tfvars file as per setup
-
 terraform {
   required_providers {
     nutanix = {
-      source = "nutanixtemp/nutanix"
-      version = "1.99.99"
+      source  = "nutanix/nutanix"
+      version = "2.0.0"
     }
   }
 }
