@@ -1814,11 +1814,50 @@ func ResourceNutanixVirtualMachineV2Create(ctx context.Context, d *schema.Resour
 			vm := vmIntentResponse.(*config.GetVmApiResponse)
 			vmResp := vm.Data.GetValue().(config.Vm)
 
-			if len(vmResp.Nics) > 0 && len(vmResp.Nics[0].NetworkInfo.Ipv4Info.LearnedIpAddresses) != 0 {
-				d.SetConnInfo(map[string]string{
-					"type": "ssh",
-					"host": *vmResp.Nics[0].NetworkInfo.Ipv4Info.LearnedIpAddresses[0].Value,
-				})
+			// Find first NIC with an IP address for SSH connection
+			for _, nic := range vmResp.Nics {
+				if nic.NicNetworkInfo != nil {
+					networkInfoInterface := nic.NicNetworkInfo.GetValue()
+					if networkInfoInterface == nil {
+						continue
+					}
+					
+					rawNetworkInfo, err := json.Marshal(networkInfoInterface)
+					if err != nil {
+						continue
+					}
+					
+					var networkInfoMap map[string]interface{}
+					if err := json.Unmarshal(rawNetworkInfo, &networkInfoMap); err != nil {
+						continue
+					}
+					
+					// Check ipv4Config first (for assigned IPs)
+					if ipv4Config, ok := networkInfoMap["ipv4Config"].(map[string]interface{}); ok {
+						if ipAddress, ok := ipv4Config["ipAddress"].(map[string]interface{}); ok {
+							if ipValue, ok := ipAddress["value"].(string); ok && ipValue != "" {
+								d.SetConnInfo(map[string]string{
+									"type": "ssh",
+									"host": ipValue,
+								})
+								break
+							}
+						}
+					} else if ipv4Info, ok := networkInfoMap["ipv4Info"].(map[string]interface{}); ok {
+						// Fallback to ipv4Info if available (for learned IPs)
+						if learnedAddresses, ok := ipv4Info["learnedIpAddresses"].([]interface{}); ok && len(learnedAddresses) > 0 {
+							if addrMap, ok := learnedAddresses[0].(map[string]interface{}); ok {
+								if ipValue, ok := addrMap["value"].(string); ok && ipValue != "" {
+									d.SetConnInfo(map[string]string{
+										"type": "ssh",
+										"host": ipValue,
+									})
+									break
+								}
+							}
+						}
+					}
+				}
 			}
 		}
 	}
@@ -3862,30 +3901,136 @@ func waitForIPRefreshFunc(client *vmm.Client, vmUUID string) resource.StateRefre
 			hasNicsNeedingIP := false
 			hasNicsWithIP := false
 
-			for _, nic := range getResp.Nics {
-				// Handle nil NetworkInfo for SR-IOV NICs or other cases
-				if nic.NetworkInfo != nil {
-					// Check if this is a DIRECT_NIC (SR-IOV) that doesn't need IP assignment
-					if nic.NetworkInfo.NicType != nil && *nic.NetworkInfo.NicType == config.NicType(3) { // DIRECT_NIC
-						// SR-IOV NICs typically don't get IP addresses assigned at hypervisor level
-						// Check if IP assignment is explicitly enabled
-						needsIP := false
-						if nic.NetworkInfo.Ipv4Config != nil && nic.NetworkInfo.Ipv4Config.ShouldAssignIp != nil && *nic.NetworkInfo.Ipv4Config.ShouldAssignIp {
-							needsIP = true
-							hasNicsNeedingIP = true
+			log.Printf("[DEBUG] waitForIPRefreshFunc: Checking %d NICs for IP assignment", len(getResp.Nics))
+
+			for i, nic := range getResp.Nics {
+				// Check the polymorphic NicNetworkInfo first
+				if nic.NicNetworkInfo != nil {
+					// Extract polymorphic network info
+					networkInfoInterface := nic.NicNetworkInfo.GetValue()
+					if networkInfoInterface != nil {
+						// Convert to JSON to inspect the object type and data
+						jsonBytes, err := json.Marshal(networkInfoInterface)
+						if err == nil {
+							var rawNetworkInfo map[string]interface{}
+							if json.Unmarshal(jsonBytes, &rawNetworkInfo) == nil {
+								objectType, _ := rawNetworkInfo["$objectType"].(string)
+								log.Printf("[DEBUG] waitForIPRefreshFunc: NIC %d has polymorphic NetworkInfo type: %s", i, objectType)
+
+								// Check if this is a SR-IOV NIC (DIRECT_NIC)
+								if objectType == "vmm.v4.ahv.config.SriovNicNetworkInfo" {
+									// SR-IOV NIC - check if IP assignment is needed
+									shouldAssignIP := false
+									if ipv4Config, ok := rawNetworkInfo["ipv4Config"].(map[string]interface{}); ok {
+										if shouldAssign, ok := ipv4Config["shouldAssignIp"].(bool); ok {
+											shouldAssignIP = shouldAssign
+										}
+									}
+
+									log.Printf("[DEBUG] waitForIPRefreshFunc: NIC %d is SR-IOV (DIRECT_NIC), should_assign_ip=%t", i, shouldAssignIP)
+
+									if shouldAssignIP {
+										// SR-IOV NIC with IP assignment requested
+										hasNicsNeedingIP = true
+										if ipv4Info, ok := rawNetworkInfo["ipv4Info"].(map[string]interface{}); ok {
+											if learnedAddresses, ok := ipv4Info["learnedIpAddresses"].([]interface{}); ok {
+												for _, addr := range learnedAddresses {
+													if addrMap, ok := addr.(map[string]interface{}); ok {
+														if ipValue, ok := addrMap["value"].(string); ok && ipValue != "" {
+															hasNicsWithIP = true
+															log.Printf("[DEBUG] waitForIPRefreshFunc: SR-IOV NIC %d has IP: %s", i, ipValue)
+															break
+														}
+													}
+												}
+											}
+										}
+									} else {
+										log.Printf("[DEBUG] waitForIPRefreshFunc: SR-IOV NIC %d does not need IP assignment, skipping", i)
+									}
+								} else {
+									// Regular NIC - check should_assign_ip setting
+									shouldAssignIP := true
+									if ipv4Config, ok := rawNetworkInfo["ipv4Config"].(map[string]interface{}); ok {
+										if shouldAssignVal, ok := ipv4Config["shouldAssignIp"].(bool); ok {
+											shouldAssignIP = shouldAssignVal
+										}
+									}
+									
+									log.Printf("[DEBUG] waitForIPRefreshFunc: NIC %d is regular NIC (%s), should_assign_ip=%t", i, objectType, shouldAssignIP)
+									
+									if shouldAssignIP {
+										hasNicsNeedingIP = true
+										
+										// Debug: Print the entire rawNetworkInfo structure for regular NICs
+										if rawNetworkInfoBytes, err := json.Marshal(rawNetworkInfo); err == nil {
+											log.Printf("[DEBUG] waitForIPRefreshFunc: Regular NIC %d rawNetworkInfo: %s", i, string(rawNetworkInfoBytes))
+										}
+										
+										// Check ipv4Config first (used for assigned IPs)
+										if ipv4Config, ok := rawNetworkInfo["ipv4Config"].(map[string]interface{}); ok {
+											log.Printf("[DEBUG] waitForIPRefreshFunc: Regular NIC %d found ipv4Config", i)
+											if ipAddress, ok := ipv4Config["ipAddress"].(map[string]interface{}); ok {
+												if ipValue, ok := ipAddress["value"].(string); ok && ipValue != "" {
+													hasNicsWithIP = true
+													log.Printf("[DEBUG] waitForIPRefreshFunc: Regular NIC %d has IP: %s", i, ipValue)
+												}
+											}
+										} else if ipv4Info, ok := rawNetworkInfo["ipv4Info"].(map[string]interface{}); ok {
+											// Fallback to ipv4Info if available
+											log.Printf("[DEBUG] waitForIPRefreshFunc: Regular NIC %d found ipv4Info", i)
+											if learnedAddresses, ok := ipv4Info["learnedIpAddresses"].([]interface{}); ok {
+												log.Printf("[DEBUG] waitForIPRefreshFunc: Regular NIC %d found learnedIpAddresses with %d entries", i, len(learnedAddresses))
+												for _, addr := range learnedAddresses {
+													if addrMap, ok := addr.(map[string]interface{}); ok {
+														if ipValue, ok := addrMap["value"].(string); ok && ipValue != "" {
+															hasNicsWithIP = true
+															log.Printf("[DEBUG] waitForIPRefreshFunc: Regular NIC %d has IP: %s", i, ipValue)
+															break
+														}
+													}
+												}
+											} else {
+												log.Printf("[DEBUG] waitForIPRefreshFunc: Regular NIC %d no learnedIpAddresses found", i)
+											}
+										} else {
+											log.Printf("[DEBUG] waitForIPRefreshFunc: Regular NIC %d no ipv4Config or ipv4Info found", i)
+										}
+									} else {
+										log.Printf("[DEBUG] waitForIPRefreshFunc: Regular NIC %d does not need IP assignment (should_assign_ip=false), skipping", i)
+									}
+								}
+							}
 						}
-						
-						// If SR-IOV NIC needs IP, check for it
-						if needsIP && nic.NetworkInfo.Ipv4Info != nil {
-							for _, ip := range nic.NetworkInfo.Ipv4Info.LearnedIpAddresses {
-								if ip.Value != nil {
-									hasNicsWithIP = true
-									break
+					}
+				} else if nic.NetworkInfo != nil {
+					// Fallback to flattened NetworkInfo
+					nicType := "UNKNOWN"
+					if nic.NetworkInfo.NicType != nil {
+						nicType = string(*nic.NetworkInfo.NicType)
+					}
+
+					log.Printf("[DEBUG] waitForIPRefreshFunc: NIC %d using flattened NetworkInfo, type: %s", i, nicType)
+
+					if nic.NetworkInfo.NicType != nil && *nic.NetworkInfo.NicType == config.NicType(3) { // DIRECT_NIC
+						shouldAssignIP := false
+						if nic.NetworkInfo.Ipv4Config != nil && nic.NetworkInfo.Ipv4Config.ShouldAssignIp != nil {
+							shouldAssignIP = *nic.NetworkInfo.Ipv4Config.ShouldAssignIp
+						}
+
+						if shouldAssignIP {
+							hasNicsNeedingIP = true
+							if nic.NetworkInfo.Ipv4Info != nil {
+								for _, ip := range nic.NetworkInfo.Ipv4Info.LearnedIpAddresses {
+									if ip.Value != nil {
+										hasNicsWithIP = true
+										break
+									}
 								}
 							}
 						}
 					} else {
-						// Regular NIC - check for IP assignment
+						// Regular NIC
 						hasNicsNeedingIP = true
 						if nic.NetworkInfo.Ipv4Info != nil {
 							for _, ip := range nic.NetworkInfo.Ipv4Info.LearnedIpAddresses {
@@ -3896,14 +4041,21 @@ func waitForIPRefreshFunc(client *vmm.Client, vmUUID string) resource.StateRefre
 							}
 						}
 					}
+				} else {
+					log.Printf("[DEBUG] waitForIPRefreshFunc: NIC %d has nil NetworkInfo (both polymorphic and flattened)", i)
 				}
 			}
 
-			// If we have NICs that need IP and at least one has IP, or no NICs need IP, we're available
+			log.Printf("[DEBUG] waitForIPRefreshFunc: hasNicsNeedingIP=%t, hasNicsWithIP=%t", hasNicsNeedingIP, hasNicsWithIP)
+
+			// If no NICs need IP assignment, or all NICs that need IP have received it, we're ready
 			if !hasNicsNeedingIP || hasNicsWithIP {
+				log.Printf("[DEBUG] waitForIPRefreshFunc: VM is AVAILABLE for use")
 				return resp, "AVAILABLE", nil
 			}
 		}
+
+		log.Printf("[DEBUG] waitForIPRefreshFunc: Still WAITING for IP assignment")
 		return resp, "WAITING", nil
 	}
 }
