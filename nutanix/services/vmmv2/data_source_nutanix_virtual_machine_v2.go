@@ -1089,6 +1089,18 @@ func DatasourceNutanixVirtualMachineV4() *schema.Resource {
 											},
 										},
 									},
+									"dp_offload_profile_reference": {
+										Type:     schema.TypeList,
+										Computed: true,
+										Elem: &schema.Resource{
+											Schema: map[string]*schema.Schema{
+												"ext_id": {
+													Type:     schema.TypeString,
+													Computed: true,
+												},
+											},
+										},
+									},
 								},
 							},
 						},
@@ -2607,11 +2619,13 @@ func flattenPolymorphicNicBackingInfo(pr interface{}) []map[string]interface{} {
 		return flattenEmulatedNic(nil) // Fallback to empty structure
 	}
 
-	// Check if this is a SriovNic based on $objectType
+	// Check if this is a SriovNic or DpOffloadNic based on $objectType
 	objectType, _ := rawNic["$objectType"].(string)
 
 	if objectType == "vmm.v4.ahv.config.SriovNic" {
 		return flattenSriovNic(rawNic)
+	} else if objectType == "vmm.v4.ahv.config.DpOffloadNic" {
+		return flattenDpOffloadNic(rawNic)
 	}
 
 	// Default to EmulatedNic handling for unknown types
@@ -2669,6 +2683,52 @@ func flattenSriovNic(rawNic map[string]interface{}) []map[string]interface{} {
 	return nicList
 }
 
+func flattenDpOffloadNic(rawNic map[string]interface{}) []map[string]interface{} {
+	nicList := make([]map[string]interface{}, 0)
+	nic := make(map[string]interface{})
+
+	// Extract basic fields
+	if macAddress, ok := rawNic["macAddress"].(string); ok {
+		nic["mac_address"] = macAddress
+	} else {
+		nic["mac_address"] = ""
+	}
+
+	if isConnected, ok := rawNic["isConnected"].(bool); ok {
+		nic["is_connected"] = isConnected
+	} else {
+		nic["is_connected"] = false
+	}
+
+	// DP-Offload NICs typically don't have a model field like EmulatedNic
+	nic["model"] = ""
+	nic["num_queues"] = 0
+
+	// DP-Offload specific fields - not SR-IOV but still offloaded
+	nic["sriov_enabled"] = false
+	nic["is_pass_through"] = false
+
+	// Handle DP-Offload profile reference
+	dpOffloadProfileRef := []map[string]interface{}{}
+	if dpOffloadProfileReference, ok := rawNic["dpOffloadProfileReference"].(map[string]interface{}); ok {
+		if extID, ok := dpOffloadProfileReference["extId"].(string); ok {
+			dpOffloadProfileRef = append(dpOffloadProfileRef, map[string]interface{}{
+				"ext_id": extID,
+			})
+		}
+	}
+	nic["dp_offload_profile_reference"] = dpOffloadProfileRef
+
+	// DP-Offload NICs don't have SR-IOV profile reference
+	nic["nic_profile_reference"] = []map[string]interface{}{}
+
+	// DP-Offload NICs don't have physical address like SR-IOV
+	nic["physical_address"] = []map[string]interface{}{}
+
+	nicList = append(nicList, nic)
+	return nicList
+}
+
 func flattenEmulatedNic(pr *config.EmulatedNic) []map[string]interface{} {
 	if pr != nil {
 		nicList := make([]map[string]interface{}, 0)
@@ -2719,7 +2779,7 @@ func flattenNicNetworkInfo(pr *config.NicNetworkInfo) []map[string]interface{} {
 		if pr.ObjectType_ != nil {
 			log.Printf("[DEBUG] flattenNicNetworkInfo: ObjectType_ value: %s", *pr.ObjectType_)
 		}
-		
+
 		nicList := make([]map[string]interface{}, 0)
 		nic := make(map[string]interface{})
 
@@ -2811,6 +2871,8 @@ func flattenPolymorphicNicNetworkInfo(pr *config.OneOfNicNicNetworkInfo) []map[s
 		// Fallback: try to infer nic_type from objectType
 		if objectType == "vmm.v4.ahv.config.SriovNicNetworkInfo" {
 			nic["nic_type"] = "DIRECT_NIC"
+		} else if objectType == "vmm.v4.ahv.config.DpOffloadNicNetworkInfo" {
+			nic["nic_type"] = "DP_OFFLOAD_NIC"
 		} else {
 			nic["nic_type"] = "NORMAL_NIC"
 		}
@@ -2841,6 +2903,10 @@ func flattenPolymorphicNicNetworkInfo(pr *config.OneOfNicNicNetworkInfo) []map[s
 		} else {
 			nic["vlan_id"] = 0
 		}
+	} else if objectType == "vmm.v4.ahv.config.DpOffloadNicNetworkInfo" {
+		// For DpOffloadNicNetworkInfo, DP-Offload NICs don't have VLAN ID configuration like SR-IOV
+		// The subnet configuration is already handled in the common fields section above
+		log.Printf("[DEBUG] flattenPolymorphicNicNetworkInfo: DpOffloadNicNetworkInfo detected, no special fields to handle")
 	} else if objectType == "vmm.v4.ahv.config.VirtualEthernetNicNetworkInfo" {
 		// For VirtualEthernetNicNetworkInfo, handle IP configuration and other fields
 		if ipv4Config, ok := rawNetworkInfo["ipv4Config"].(map[string]interface{}); ok {
@@ -2882,6 +2948,8 @@ func flattenNicTypeFromInt(nicType int) string {
 		return "NETWORK_FUNCTION_NIC"
 	case 5:
 		return "SPAN_DESTINATION_NIC"
+	case 6:
+		return "DP_OFFLOAD_NIC"
 	default:
 		return "UNKNOWN"
 	}
@@ -2890,7 +2958,7 @@ func flattenNicTypeFromInt(nicType int) string {
 // Helper functions for flattening raw interface{} data
 func flattenIPv4ConfigFromRaw(ipv4Config map[string]interface{}) []map[string]interface{} {
 	config := make(map[string]interface{})
-	
+
 	if ipAddress, ok := ipv4Config["ipAddress"].(map[string]interface{}); ok {
 		if value, ok := ipAddress["value"].(string); ok {
 			config["ip_address"] = []map[string]interface{}{
@@ -2908,7 +2976,7 @@ func flattenIPv4ConfigFromRaw(ipv4Config map[string]interface{}) []map[string]in
 
 func flattenIPv4InfoFromRaw(ipv4Info map[string]interface{}) []map[string]interface{} {
 	info := make(map[string]interface{})
-	
+
 	if ipAddress, ok := ipv4Info["ipAddress"].(map[string]interface{}); ok {
 		if value, ok := ipAddress["value"].(string); ok {
 			info["ip_address"] = []map[string]interface{}{
@@ -2922,7 +2990,7 @@ func flattenIPv4InfoFromRaw(ipv4Info map[string]interface{}) []map[string]interf
 
 func flattenNetworkFunctionChainFromRaw(networkFunctionChain map[string]interface{}) []map[string]interface{} {
 	chain := make(map[string]interface{})
-	
+
 	if extId, ok := networkFunctionChain["extId"].(string); ok {
 		chain["ext_id"] = extId
 	}

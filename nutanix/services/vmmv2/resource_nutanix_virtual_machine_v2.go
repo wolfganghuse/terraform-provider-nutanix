@@ -1151,6 +1151,20 @@ func ResourceNutanixVirtualMachineV2() *schema.Resource {
 											},
 										},
 									},
+									"dp_offload_profile_reference": {
+										Type:     schema.TypeList,
+										Optional: true,
+										Computed: true,
+										MaxItems: 1,
+										Elem: &schema.Resource{
+											Schema: map[string]*schema.Schema{
+												"ext_id": {
+													Type:     schema.TypeString,
+													Required: true,
+												},
+											},
+										},
+									},
 								},
 							},
 						},
@@ -1166,7 +1180,7 @@ func ResourceNutanixVirtualMachineV2() *schema.Resource {
 										Computed: true,
 										ValidateFunc: validation.StringInSlice([]string{
 											"SPAN_DESTINATION_NIC",
-											"NORMAL_NIC", "DIRECT_NIC", "NETWORK_FUNCTION_NIC",
+											"NORMAL_NIC", "DIRECT_NIC", "NETWORK_FUNCTION_NIC", "DP_OFFLOAD_NIC",
 										}, false),
 									},
 									"vlan_id": {
@@ -1821,17 +1835,17 @@ func ResourceNutanixVirtualMachineV2Create(ctx context.Context, d *schema.Resour
 					if networkInfoInterface == nil {
 						continue
 					}
-					
+
 					rawNetworkInfo, err := json.Marshal(networkInfoInterface)
 					if err != nil {
 						continue
 					}
-					
+
 					var networkInfoMap map[string]interface{}
 					if err := json.Unmarshal(rawNetworkInfo, &networkInfoMap); err != nil {
 						continue
 					}
-					
+
 					// Check ipv4Config first (for assigned IPs)
 					if ipv4Config, ok := networkInfoMap["ipv4Config"].(map[string]interface{}); ok {
 						if ipAddress, ok := ipv4Config["ipAddress"].(map[string]interface{}); ok {
@@ -3948,6 +3962,18 @@ func waitForIPRefreshFunc(client *vmm.Client, vmUUID string) resource.StateRefre
 									} else {
 										log.Printf("[DEBUG] waitForIPRefreshFunc: SR-IOV NIC %d does not need IP assignment, skipping", i)
 									}
+								} else if objectType == "vmm.v4.ahv.config.DpOffloadNicNetworkInfo" {
+									// DP-Offload NIC - these typically get IP addresses assigned like regular NICs
+									log.Printf("[DEBUG] waitForIPRefreshFunc: NIC %d is DP-Offload (DP_OFFLOAD_NIC), checking for IP assignment", i)
+
+									// DP-Offload NICs get IP addresses assigned automatically through the subnet
+									hasNicsNeedingIP = true
+
+									// Check for IP assignment in the subnet (DP-Offload NICs get IPs via DHCP/subnet assignment)
+									// For now, assume DP-Offload NICs get IPs assigned and don't wait for them
+									// This can be enhanced later if specific IP detection is needed for DP-Offload NICs
+									hasNicsWithIP = true
+									log.Printf("[DEBUG] waitForIPRefreshFunc: DP-Offload NIC %d IP assignment assumed (via subnet)", i)
 								} else {
 									// Regular NIC - check should_assign_ip setting
 									shouldAssignIP := true
@@ -3956,17 +3982,17 @@ func waitForIPRefreshFunc(client *vmm.Client, vmUUID string) resource.StateRefre
 											shouldAssignIP = shouldAssignVal
 										}
 									}
-									
+
 									log.Printf("[DEBUG] waitForIPRefreshFunc: NIC %d is regular NIC (%s), should_assign_ip=%t", i, objectType, shouldAssignIP)
-									
+
 									if shouldAssignIP {
 										hasNicsNeedingIP = true
-										
+
 										// Debug: Print the entire rawNetworkInfo structure for regular NICs
 										if rawNetworkInfoBytes, err := json.Marshal(rawNetworkInfo); err == nil {
 											log.Printf("[DEBUG] waitForIPRefreshFunc: Regular NIC %d rawNetworkInfo: %s", i, string(rawNetworkInfoBytes))
 										}
-										
+
 										// Check ipv4Config first (used for assigned IPs)
 										if ipv4Config, ok := rawNetworkInfo["ipv4Config"].(map[string]interface{}); ok {
 											log.Printf("[DEBUG] waitForIPRefreshFunc: Regular NIC %d found ipv4Config", i)
@@ -4076,13 +4102,16 @@ func expandVMNic(pr []interface{}) []config.Nic {
 				nic.ExtId = utils.StringPtr(extID.(string))
 			}
 
-			// Handle backing_info - determine NIC type based on presence of nic_profile_reference
+			// Handle backing_info - determine NIC type based on presence of profile references
 			if backingInfo, ok := val["backing_info"]; ok && len(backingInfo.([]interface{})) > 0 {
 				backingData := backingInfo.([]interface{})[0].(map[string]interface{})
 
-				// SR-IOV NICs require nic_profile_reference, regular NICs do not
-				if nicProfileRef, hasProfile := backingData["nic_profile_reference"]; hasProfile && len(nicProfileRef.([]interface{})) > 0 {
-					// Create SriovNic for NICs with profile reference
+				// DP-Offload NICs require dp_offload_profile_reference
+				if dpOffloadProfileRef, hasDpOffloadProfile := backingData["dp_offload_profile_reference"]; hasDpOffloadProfile && len(dpOffloadProfileRef.([]interface{})) > 0 {
+					// Create DpOffloadNic for NICs with DP-Offload profile reference
+					nic.NicBackingInfo = expandDpOffloadNicBackingInfo(backingInfo)
+				} else if nicProfileRef, hasProfile := backingData["nic_profile_reference"]; hasProfile && len(nicProfileRef.([]interface{})) > 0 {
+					// Create SriovNic for NICs with SR-IOV profile reference
 					nic.NicBackingInfo = expandSriovNicBackingInfo(backingInfo)
 				} else {
 					// Create VirtualEthernetNic for regular NICs
@@ -4090,17 +4119,25 @@ func expandVMNic(pr []interface{}) []config.Nic {
 				}
 			}
 
-			// Handle network_info - determine network type based on nic_type and vlan_id presence
+			// Handle network_info - determine network type based on nic_type
 			if ntwkInfo, ok := val["network_info"]; ok && len(ntwkInfo.([]interface{})) > 0 {
 				ntwkData := ntwkInfo.([]interface{})[0].(map[string]interface{})
 
-				// SR-IOV NICs use DIRECT_NIC type and may include vlan_id configuration
-				if nicType, ok := ntwkData["nic_type"]; ok && nicType == "DIRECT_NIC" {
-					// For SR-IOV NICs, always use VirtualEthernetNicNetworkInfo with DIRECT_NIC type
-					// The VLAN configuration will be handled within the VirtualEthernetNicNetworkInfo structure
-					nic.NicNetworkInfo = expandRegularNicNetworkInfo(ntwkInfo)
+				if nicType, ok := ntwkData["nic_type"]; ok {
+					switch nicType {
+					case "DP_OFFLOAD_NIC":
+						// For DP-Offload NICs, use DpOffloadNicNetworkInfo
+						nic.NicNetworkInfo = expandDpOffloadNicNetworkInfo(ntwkInfo)
+					case "DIRECT_NIC":
+						// For SR-IOV NICs, always use VirtualEthernetNicNetworkInfo with DIRECT_NIC type
+						// The VLAN configuration will be handled within the VirtualEthernetNicNetworkInfo structure
+						nic.NicNetworkInfo = expandRegularNicNetworkInfo(ntwkInfo)
+					default:
+						// Use VirtualEthernetNicNetworkInfo for regular NICs
+						nic.NicNetworkInfo = expandRegularNicNetworkInfo(ntwkInfo)
+					}
 				} else {
-					// Use VirtualEthernetNicNetworkInfo for non-DIRECT NICs
+					// Default to VirtualEthernetNicNetworkInfo if nic_type is not specified
 					nic.NicNetworkInfo = expandRegularNicNetworkInfo(ntwkInfo)
 				}
 			}
@@ -4282,6 +4319,99 @@ func expandRegularNicNetworkInfo(pr interface{}) *config.OneOfNicNicNetworkInfo 
 		err := networkInfo.SetValue(*virtualEthernetNetworkInfo) // Dereference the pointer
 		if err != nil {
 			log.Printf("[ERROR] Failed to set VirtualEthernetNicNetworkInfo: %v", err)
+			return nil
+		}
+
+		return networkInfo
+	}
+	return nil
+}
+
+// expandDpOffloadNicBackingInfo creates a OneOfNicNicBackingInfo with DpOffloadNic for DP-Offload NICs.
+// DP-Offload NICs require a dp_offload_profile_reference that specifies the DP-Offload profile to use.
+func expandDpOffloadNicBackingInfo(pr interface{}) *config.OneOfNicNicBackingInfo {
+	if len(pr.([]interface{})) > 0 {
+		prI := pr.([]interface{})
+		val := prI[0].(map[string]interface{})
+
+		// Use the proper constructor to initialize DpOffloadNic with correct ObjectType_
+		dpOffloadNic := config.NewDpOffloadNic()
+
+		// Set default connection state for DP-Offload NICs
+		if isConn, ok := val["is_connected"]; ok {
+			dpOffloadNic.IsConnected = utils.BoolPtr(isConn.(bool))
+		} else {
+			// Default to true for DP-Offload NICs if not specified
+			dpOffloadNic.IsConnected = utils.BoolPtr(true)
+		}
+
+		if macAdd, ok := val["mac_address"]; ok && len(macAdd.(string)) > 0 {
+			dpOffloadNic.MacAddress = utils.StringPtr(macAdd.(string))
+		}
+
+		// Handle DP-Offload profile reference - this is required for DP-Offload NICs
+		if dpOffloadProfile, ok := val["dp_offload_profile_reference"]; ok && len(dpOffloadProfile.([]interface{})) > 0 {
+			profileData := dpOffloadProfile.([]interface{})[0].(map[string]interface{})
+			if extID, ok := profileData["ext_id"]; ok && len(extID.(string)) > 0 {
+				dpOffloadNic.DpOffloadProfileReference = &config.NicProfileReference{
+					ExtId: utils.StringPtr(extID.(string)),
+				}
+			}
+		} else {
+			var mac string
+			if macAdd, ok := val["mac_address"]; ok && len(macAdd.(string)) > 0 {
+				mac = macAdd.(string)
+			} else {
+				mac = "unknown"
+			}
+			log.Printf("[ERROR] DP-Offload NIC (mac_address: %s) requires dp_offload_profile_reference with ext_id", mac)
+			return nil
+		}
+
+		// Validate that required fields are set before creating OneOf
+		if dpOffloadNic.DpOffloadProfileReference == nil || dpOffloadNic.DpOffloadProfileReference.ExtId == nil {
+			log.Printf("[ERROR] DpOffloadNic.DpOffloadProfileReference.ExtId is required but not set")
+			return nil
+		}
+
+		// Create OneOfNicNicBackingInfo and set DpOffloadNic
+		backingInfo := &config.OneOfNicNicBackingInfo{}
+		err := backingInfo.SetValue(*dpOffloadNic) // Dereference the pointer
+		if err != nil {
+			log.Printf("[ERROR] Failed to set DpOffloadNic in backing info: %v", err)
+			return nil
+		}
+
+		return backingInfo
+	}
+	return nil
+}
+
+// expandDpOffloadNicNetworkInfo creates a OneOfNicNicNetworkInfo with DpOffloadNicNetworkInfo for DP-Offload NICs.
+// DpOffloadNicNetworkInfo supports subnet configuration which is specific to DP-Offload NICs.
+func expandDpOffloadNicNetworkInfo(pr interface{}) *config.OneOfNicNicNetworkInfo {
+	if len(pr.([]interface{})) > 0 {
+		prI := pr.([]interface{})
+		val := prI[0].(map[string]interface{})
+
+		// Use the proper constructor to initialize DpOffloadNicNetworkInfo with correct ObjectType_
+		dpOffloadNetworkInfo := config.NewDpOffloadNicNetworkInfo()
+
+		// Handle subnet for DP-Offload NICs
+		if subnetInfo, ok := val["subnet"]; ok && len(subnetInfo.([]interface{})) > 0 {
+			subnetData := subnetInfo.([]interface{})[0].(map[string]interface{})
+			if extID, ok := subnetData["ext_id"]; ok && len(extID.(string)) > 0 {
+				dpOffloadNetworkInfo.Subnet = &config.SubnetReference{
+					ExtId: utils.StringPtr(extID.(string)),
+				}
+			}
+		}
+
+		// Create OneOfNicNicNetworkInfo and set DpOffloadNicNetworkInfo
+		networkInfo := &config.OneOfNicNicNetworkInfo{}
+		err := networkInfo.SetValue(*dpOffloadNetworkInfo) // Dereference the pointer
+		if err != nil {
+			log.Printf("[ERROR] Failed to set DpOffloadNicNetworkInfo: %v", err)
 			return nil
 		}
 

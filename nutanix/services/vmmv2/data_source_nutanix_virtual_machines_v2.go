@@ -1111,6 +1111,18 @@ func DatasourceNutanixVirtualMachinesV4() *schema.Resource {
 														},
 													},
 												},
+												"dp_offload_profile_reference": {
+													Type:     schema.TypeList,
+													Computed: true,
+													Elem: &schema.Resource{
+														Schema: map[string]*schema.Schema{
+															"ext_id": {
+																Type:     schema.TypeString,
+																Computed: true,
+															},
+														},
+													},
+												},
 											},
 										},
 									},
