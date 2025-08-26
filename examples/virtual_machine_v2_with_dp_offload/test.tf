@@ -46,9 +46,14 @@ variable "ssh_public_key_file" {
 variable "subnet_name" {
   description = "Name of the subnet to use"
   type        = string
-  default     = "dp-offload-vlan1000"
+  default     = "dp-offload-vlan2000"
 }
 
+variable "subnet_name2" {
+  description = "Name of the subnet to use"
+  type        = string
+  default     = "User1"
+}
 variable "image_name" {
   description = "Name of the image to use"
   type        = string
@@ -71,6 +76,9 @@ data "nutanix_subnets_v2" "vm-subnet" {
   filter = "name eq '${var.subnet_name}'"
 }
 
+data "nutanix_subnets_v2" "vm-subnet2" {
+  filter = "name eq '${var.subnet_name2}'"
+}
 # Query all subnets to find advanced networking ones
 data "nutanix_subnets_v2" "all_subnets" {}
 
@@ -139,6 +147,16 @@ resource "nutanix_virtual_machine_v2" "test-dp-offload" {
     }
   }
 
+  nics {
+    network_info {
+      nic_type = "NORMAL_NIC"
+      subnet {
+        ext_id = data.nutanix_subnets_v2.vm-subnet2.subnets[0].ext_id
+      }
+      vlan_mode = "ACCESS"
+    }
+  }
+
   # DP-Offload NIC for accelerated networking
   nics {
     backing_info {
@@ -154,21 +172,6 @@ resource "nutanix_virtual_machine_v2" "test-dp-offload" {
       
       subnet {
         ext_id = data.nutanix_subnets_v2.vm-subnet.subnets[0].ext_id
-      }
-    }
-  }
-
-  guest_customization {
-    config {
-      cloud_init {
-        cloud_init_script {
-          user_data {
-            value = base64encode(templatefile("./cloud-config.tftpl", {
-              machine_name = "slurm-mgmt"
-              ssh_key      = file(var.ssh_public_key_file)
-            }))
-          }
-        }
       }
     }
   }
